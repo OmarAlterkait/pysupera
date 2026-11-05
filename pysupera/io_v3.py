@@ -112,6 +112,13 @@ FORMAT_VERSION_V3 = "4.2.0"
 #: EDepSim reader produces it.  JAXTPC input adds direction and momentum.
 DEFAULT_POINT_COLUMNS = ('x', 'y', 'z', 'time', 'dE', 'dX')
 
+#: The ``points_energy`` root attribute when points/flat has a ``dE`` column:
+#: true deposited energy in MeV.  Every pysupera run writes one -- with
+#: JAXTPC input the stored points are the deposits behind the hits -- so a
+#: reader need not take the energy column's meaning from ``hit_energy``,
+#: which describes the cloud the partitioning ran on.
+POINTS_ENERGY_TRUE_DE = "true_dE_MeV"
+
 #: Rows per chunk when points/flat is chunked by column: 64 KiB of float32.
 _COLUMN_CHUNK_ROWS = 16384
 
@@ -206,6 +213,8 @@ class EventWriterV3:
         f = self._f
         f.create_dataset("format_version", data=FORMAT_VERSION_V3)
         f.create_dataset("n_events", data=np.int64(0))
+        if "dE" in self._pt_columns:
+            f.attrs["points_energy"] = POINTS_ENERGY_TRUE_DE
         rows = _chunk_rows(1, target_bytes=_CHUNK_TARGET_BYTES_META)
         for grp in ("events", "points"):
             g = f.create_group(grp)
@@ -361,10 +370,10 @@ class EventWriterV3:
         """
         Record how this file was produced, as root attributes.
 
-        Only a handful of short strings, but they remove a guess: nothing in
-        the point columns says whether the energy column holds true dE or
-        measured charge, and a viewer that has to infer it from the presence
-        of negative values gets it wrong on a quiet event.
+        Only a handful of short strings, but they remove a guess.  Most
+        (``point_source``, ``hit_energy``, ``hit_x_from``) describe the cloud
+        the *partitioning* ran on, not points/flat, whose energy column the
+        writer states itself in ``points_energy``.
         """
         for k, v in meta.items():
             if v is not None:

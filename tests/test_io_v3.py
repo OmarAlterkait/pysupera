@@ -65,6 +65,18 @@ class TestFileShape:
             for c in COLUMNS:
                 assert f"particles/{c}" in f
 
+    def test_points_energy_states_true_de(self, tmp_path):
+        """points_energy says what the dE column is, beside the partitioning
+        attributes, which describe something else."""
+        path = str(tmp_path / "meta.h5")
+        with open_writer_v3(path) as w:
+            w.set_meta({"point_source": "hits", "hit_energy": "charge"})
+            w.append_event(build_layout(*chain_event()))
+        with h5py.File(path) as f:
+            assert f.attrs["points_energy"] == "true_dE_MeV"
+            assert f.attrs["hit_energy"] == "charge"
+            assert "dE" in [c.decode() for c in f["points/columns"][()]]
+
     def test_all_points_are_stored_even_for_unstored_particles(self, tmp_path):
         parts, frags, insts = chain_event()
         total = sum(len(p.point_cloud) for p in parts)

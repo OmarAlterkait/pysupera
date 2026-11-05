@@ -336,11 +336,12 @@ A drag never pins, so rotating does not change what is lit.
 
 In `points/flat` it is always true dE in MeV: with JAXTPC input the stored
 points are the true deposits behind the hits, whatever the partitioning ran
-on. Measured charge stays in the JAXTPC hits file, which is where
-`vis_drift.html` reads it from. The root attributes `point_source`,
-`hit_energy`, `hit_x_from` and `readout_type` record what the *partitioning*
-ran on — for a pixel run, the hits' charge at nominal x — not what
-`points/flat` holds.
+on, and the root attribute `points_energy` (`true_dE_MeV`) says so. Measured
+charge stays in the JAXTPC hits file, which is where `vis_drift.html` reads
+it from. The root attributes `point_source`, `hit_energy` and `hit_x_from`
+record what the *partitioning* ran on — for a pixel run, the hits' charge at
+nominal x — not what `points/flat` holds; see
+[Root attributes](#root-attributes).
 
 ---
 
@@ -676,7 +677,8 @@ with read_events("output.h5") as store:
 `run_pysupera` writes a single HDF5 file. This section describes format
 **4.2.0**, recorded in the scalar dataset `format_version`.
 
-4.2.0 changes two things:
+4.2.0 changes two things, and adds the root attribute `points_energy`
+(see [Root attributes](#root-attributes)):
 
 - **A particle's `id` is its row within the event**, so every id —
   `parent_id`, `frag_id`, `inst_id`, the `hit_labels` and `groups` ids —
@@ -759,10 +761,37 @@ inter/<col>      (K,)
 groups/          JAXTPC group -> owning fragment            } JAXTPC
 hit_labels/volume{V}/plane{P}/  per hit of that plane       } input
 issues/          what the run noticed but did not stop for; see below
+(root attrs)     how the file was made; see Root attributes below
 ```
 
 Everything is concatenated across events with CSR fenceposts: event *i*
 occupies rows `offsets[i] : offsets[i+1]`.
+
+#### Root attributes
+
+HDF5 attributes on the file's root group, not datasets, so a listing of the
+groups does not show them: read them with `dict(f.attrs)` in h5py, or
+`h5dump -A -g / out.h5`. Each says what it describes. **Those marked
+*partitioning* describe the cloud the merges and clustering ran on, not
+`points/flat`**: with pixel hits the partitioning runs on the hits' charge,
+but the points stored are the true deposits behind them.
+
+| attribute | describes | values |
+|---|---|---|
+| `points_energy` | `points/flat` | `true_dE_MeV`: the `dE` column is true deposited energy in MeV (written from 4.2.0; files from 3.3.0 on hold the same, unstated) |
+| `store` | `points/flat` | `voxels`: a row is one particle's voxel; `points`: a row is one deposit |
+| `voxel_size` | `points/flat` | voxel pitch in mm, with `store=voxels` |
+| `energy_mantissa_bits` | `points/flat` | float32 mantissa bits the `dE` column was rounded to; absent means exact |
+| `kinematics_steps` | particles' `first_*` / `last_*` | `visible` (steps the readout saw, JAXTPC) or `all` (plain EDepSim); see [Kinematics](#kinematics) |
+| `point_source` | partitioning | `deposits` (true deposits) or `hits` (pixel hits) |
+| `hit_energy` | partitioning, `point_source=hits` | `charge` (measured, bipolar) or `true_de`; see [`reader.hit_energy`](#the-energy-column--readerhit_energy) |
+| `hit_x_from` | partitioning, `point_source=hits` | `nominal` (x from the drift tick, t0 at the beam time) or `true_t0`; see [`reader.hit_x_from`](#the-drift-coordinate--readerhit_x_from) |
+| `readout_type` | `hit_labels/` | `pixel` or `wire`: the JAXTPC readout whose hits are labelled |
+| `pixel_geometry` | `hit_labels/` | JSON, one entry per volume: the anode, pitch, drift velocity and tick the hits were placed with; `vis_drift.html` uses it |
+| `n_issues` | `issues/` | rows in `issues/`; per code in `issues.attrs["n_<name>"]` |
+
+Attributes that do not apply to a run are not written: a plain EDepSim run
+has no `hit_*`, `readout_type` or `pixel_geometry`.
 
 Every dataset is plain HDF5 — no pysupera code is needed to read it. The
 compression filters (LZ4, and bitshuffle+LZ4 for `points/flat` and
