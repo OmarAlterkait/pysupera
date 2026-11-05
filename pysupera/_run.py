@@ -107,7 +107,7 @@ def main(cfg: DictConfig) -> None:
                                 relabel_split_pieces, attach_split_pieces,
                                 find_buried_deltas, merge_buried_deltas,
                                 find_absorbed_deltas, relabel_absorbed_deltas)
-    from pysupera.kinematics import step_particles, instance_kinematics
+    from pysupera.kinematics import step_particles, instance_kinematics, set_creation_times
     from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, build_voxelizer, build_reader, configure
     from pysupera.preproc import _voxelize_point_cloud
     from pysupera.utils import (resolve_orphans, validate_interaction_ids,
@@ -561,6 +561,9 @@ def main(cfg: DictConfig) -> None:
                 stats['pc_size_mean'].append(
                     sum(_nonzero) / len(_nonzero) if _nonzero else 0.0
                 )
+
+                # The creation time AbsorbLEScatter breaks its last ties with.
+                set_creation_times(particles, getattr(store, 'last_kinematics', None))
 
                 # ParticlePartitioner creates and initialises the checker
                 # internally; backend-specific kwargs are forwarded via **kwargs.

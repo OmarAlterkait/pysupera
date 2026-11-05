@@ -49,6 +49,23 @@ _SHOWER = SemanticType.kShower.value
 _CONV = InteractionType.kConversion.value
 
 
+def set_creation_times(particles, kinematics):
+    """
+    Give every particle its Geant4 creation time, ``creation_time`` (ns).
+
+    Read from the reader's ``last_kinematics`` by Geant4 track id, so every
+    piece of a split track has its track's.  NaN when the reader provides
+    no kinematics or the track is not in them.  ``AbsorbLEScatter`` breaks
+    its last ties with it.
+    """
+    t_of = {}
+    if kinematics is not None and "start_pos" in kinematics:
+        t_of = dict(zip(np.asarray(kinematics["geant4_trackid"]).tolist(),
+                        np.asarray(kinematics["start_pos"])[:, 3].tolist()))
+    for p in particles:
+        p.creation_time = float(t_of.get(int(getattr(p, "geant4_id", p.id)), np.nan))
+
+
 def step_particles(n_steps, particles, group=None, group_owner=None):
     """
     Per step, the id of the pysupera particle holding its deposit; -1 if none.

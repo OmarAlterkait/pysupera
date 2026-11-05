@@ -63,6 +63,7 @@ class AbsorbLEScatter(PartitionConditionBase):
             particle IDs (not positional indices).
         """
         candidates = self._build_candidates(partitioner)
+        self._contact = {}      # particle-level path: no contact measured
         partitioner.diagnostics.record_candidates(
             f"{self.name}: Stage 1 Candidate Building", candidates
         )
@@ -75,9 +76,10 @@ class AbsorbLEScatter(PartitionConditionBase):
         Allow each ``kLEScatter`` particle to merge with at most one partner.
 
         Groups *touching_pairs* by their ``kLEScatter`` member and keeps one
-        touching non-``kLEScatter`` neighbour for each group: the partition
-        of its own ancestor when that one touches (see
-        :meth:`_home_rep_id`), otherwise the first.
+        touching non-``kLEScatter`` neighbour for each group: the one holding
+        its nearest ancestor, else its nearest relative, else by interaction,
+        contact, distance and creation time (see
+        :meth:`_select_one_merge_per_sem5`).
         Surplus candidates are discarded; when diagnostics are enabled each
         rejection is recorded with reason ``ALREADY_MERGED_WITH_OTHER``.
 
@@ -120,6 +122,9 @@ class AbsorbLEScatter(PartitionConditionBase):
         list of tuple[int, int]
             ``(le_scatter_rep_id, other_rep_id)``.
         """
+        #: (LE rep id, other rep id) -> (contact, closest distance), for
+        #: post_filter; empty until a pass finds touching pairs.
+        self._contact = {}
         # Deduplicate representatives
         unique_reps = self.unique_reps(rep_lookup)
         le_reps    = [r for r in unique_reps if r.sem_type == SemanticType.kLEScatter]
@@ -168,25 +173,33 @@ class AbsorbLEScatter(PartitionConditionBase):
         pi = m["i"].astype(np.int64)
         pj = m["j"].astype(np.int64)
 
-        # Map to rep pairs and deduplicate.  The order matters: when a
-        # kLEScatter touches several reps and none is its home,
-        # _select_one_merge_per_sem5 takes the first pair, i.e. the first in
-        # this set's iteration order, which depends on the order the pairs
-        # went in.  So they go in as query_ball_tree's sorted lists put them:
-        # by LE point, then other point, each rep pair at its first
-        # occurrence.
+        # Map to rep pairs, and keep per pair what the selection may need:
+        # how many LE points lie within D of the other rep (its contact),
+        # and the closest distance.  The list order decides nothing.
         n_ot = len(other_reps)
         rk = le_tags[pi].astype(np.int64) * n_ot + ot_tags[pj]
-        rk = rk[np.argsort(pi * len(ot_pts) + pj)]
-        _, first = np.unique(rk, return_index=True)
-        touching: set = set()
-        for k in rk[np.sort(first)].tolist():
-            touching.add((k // n_ot, k % n_ot))
-
-        candidates = [
-            (le_reps[i].id, other_reps[j].id)
-            for i, j in touching
-        ]
+        if not len(rk):
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+        order = np.argsort(rk, kind="stable")
+        rk, pi, dist = rk[order], pi[order], np.asarray(m["v"])[order]
+        start = np.flatnonzero(np.r_[True, rk[1:] != rk[:-1]])
+        pairs = rk[start]
+        dmin = np.minimum.reduceat(dist, start)
+        # an LE point counts once per pair, however many points it is near
+        inv = np.repeat(np.arange(len(pairs)), np.diff(np.r_[start, len(rk)]))
+        contact = np.bincount(np.unique(inv * len(le_pts) + pi) // len(le_pts),
+                              minlength=len(pairs))
+        le_ids = np.array([r.id for r in le_reps])[pairs // n_ot]
+        ot_ids = np.array([r.id for r in other_reps])[pairs % n_ot]
+        candidates = list(zip(le_ids.tolist(), ot_ids.tolist()))
+        # only an LE rep with more than one partner is ever ranked
+        multi = np.flatnonzero(np.r_[False, le_ids[1:] == le_ids[:-1]]
+                               | np.r_[le_ids[:-1] == le_ids[1:], False])
+        for k in multi.tolist():
+            self._contact[candidates[k]] = (int(contact[k]), float(dmin[k]))
         partitioner.diagnostics.record_candidates(
             f"{self.name}: Rep Candidate Building", candidates
         )
@@ -227,24 +240,34 @@ class AbsorbLEScatter(PartitionConditionBase):
                                    partitioner: 'ParticlePartitioner',
                                    touching_pairs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
         """
-        Keep at most one touching partner per ``kLEScatter`` particle.
+        Keep one touching partner per ``kLEScatter`` partition.
 
-        Groups pairs by their ``kLEScatter`` member and selects, in each
-        group, the pair whose partner is the particle's genealogical home
-        (:meth:`_home_rep_id`) when it is among them, else the first pair.
-        Records diagnostic rejections for the remainder.
+        Groups pairs by their ``kLEScatter`` member.  When it touches more
+        than one partition, the partner is the first of these that leaves
+        one (:meth:`_partner_keys`):
 
-        The preference matters for delta rays: one is born on its track and
-        so touches it, but it often touches something else as well -- a
-        larger delta, a shower crossing the track -- and the first pair is
-        whichever the proximity search happened to list first.  Choosing
-        among the partners it touches pulls nothing in from a distance.
+        1. the partition holding its nearest ancestor -- its parent's, else
+           its grandparent's, and so on: a low-energy piece goes where it
+           came from, so a delta ray goes to its track;
+        2. the partition holding its nearest relative, by the steps up to a
+           common ancestor and then down from it;
+        3. a partition of its own interaction;
+        4. the most contact: LE points within D of the partner;
+        5. the closest point;
+        6. the earliest creation time of the partner's representative;
+        7. the smallest representative id (an exact time tie: products of
+           one Geant4 step, or primaries of one vertex).
+
+        Every key is a property of the event -- genealogy, geometry, Geant4
+        truth, the reader's ids -- so the choice does not depend on the
+        order anything is listed in.  Records diagnostic rejections for the
+        others.
 
         Parameters
         ----------
         partitioner : ParticlePartitioner
-            Active partitioner providing ``particle_lookup`` and
-            ``diagnostics``.
+            Active partitioner providing ``particle_lookup``,
+            ``rep_lookup`` and ``diagnostics``.
         touching_pairs : list of tuple[int, int]
             All pairs that passed the proximity check.
 
@@ -265,48 +288,44 @@ class AbsorbLEScatter(PartitionConditionBase):
                 sem5_merges[id2].append((id1, id2))
 
         selected = []
+        contact = getattr(self, "_contact", None) or {}
 
-        for sem5_id, pairs in sem5_merges.items():
-            selected_pair = pairs[0]
-            if len(pairs) > 1:
-                home = self._home_rep_id(partitioner, sem5_id)
-                for pair in pairs:
-                    partner = pair[0] if pair[0] != sem5_id else pair[1]
-                    if partner == home:
-                        selected_pair = pair
-                        break
+        for sem5_id in sorted(sem5_merges):
+            pairs = sem5_merges[sem5_id]
+            if len(pairs) == 1:
+                selected.append(pairs[0])
+                continue
+            partner = lambda pr: pr[0] if pr[0] != sem5_id else pr[1]
+            keys = self._partner_keys(partitioner, sem5_id,
+                                      [partner(pr) for pr in pairs], contact)
+            selected_pair = min(pairs, key=lambda pr: keys[partner(pr)])
             selected.append(selected_pair)
 
-            if partitioner.diagnostics.enabled and len(pairs) > 1:
-                selected_partner_id = (
-                    selected_pair[0] if selected_pair[0] != sem5_id
-                    else selected_pair[1]
-                )
+            if partitioner.diagnostics.enabled:
+                selected_partner_id = partner(selected_pair)
                 for pair in pairs:
                     if pair == selected_pair:
                         continue
-                    rejected_partner_id = pair[0] if pair[0] != sem5_id else pair[1]
                     partitioner.diagnostics.record(
                         pair[0], pair[1],
                         MergeOutcome.ALREADY_MERGED_WITH_OTHER,
                         f"SemID-5 particle {sem5_id} already merged with "
                         f"particle {selected_partner_id} "
-                        f"(rejecting {rejected_partner_id})",
+                        f"(rejecting {partner(pair)})",
                         stage=f"{self.name}: Stage 3 Selection",
                     )
 
         return selected
 
     @staticmethod
-    def _home_rep_id(partitioner: 'ParticlePartitioner', le_id: int):
+    def _partner_keys(partitioner: 'ParticlePartitioner', le_id: int,
+                      partners: List[int], contact: dict) -> dict:
         """
-        The partition the ``kLEScatter`` partition *le_id* came from.
+        The sort key of each partner of the ``kLEScatter`` partition
+        *le_id*; the smallest wins (see :meth:`_select_one_merge_per_sem5`).
 
-        Walks the parent chain of the particle *le_id* and returns the
-        representative id of the first ancestor that sits in a different
-        partition -- a delta ray's track, say.  Ancestors already merged
-        into the same LE partition are skipped.  None when the chain ends
-        first.
+        The genealogy is that of the partition's representative *le_id*.  An
+        ancestor or relative counts for the partition that holds it now.
         """
         lookup = partitioner.particle_lookup
         reps = getattr(partitioner, "rep_lookup", None) or {}
@@ -315,15 +334,68 @@ class AbsorbLEScatter(PartitionConditionBase):
             r = reps.get(pid)
             return r.id if r is not None else pid
 
-        own = rep_of(le_id)
-        cur, seen = lookup.get(le_id), set()
-        while cur is not None and cur.id not in seen:
-            seen.add(cur.id)
+        targets = set(partners)
+        # The representative's parent chain, nearest first.
+        chain, cur, seen = [le_id], lookup.get(le_id), {le_id}
+        while cur is not None:
             par = cur.parent_id
-            if par is None or par == cur.id or par not in lookup:
-                return None
-            home = rep_of(par)
-            if home != own:
-                return home
+            if par is None or par in seen or par not in lookup:
+                break
+            chain.append(par)
+            seen.add(par)
             cur = lookup[par]
-        return None
+
+        # 1. nearest ancestor
+        kin = {}
+        for depth, a in enumerate(chain[1:], 1):
+            q = rep_of(a)
+            if q in targets and q not in kin:
+                kin[q] = (0, depth, 0)
+        # 2. nearest relative: from each ancestor in turn (the piece itself
+        #    first), the nearest descendants that sit in a partner
+        if not kin:
+            children = AbsorbLEScatter._children(partitioner)
+            for up, a in enumerate(chain):
+                level, down, seen_d = [a], 0, {a}
+                while level and not kin:
+                    down += 1
+                    nxt = []
+                    for x in level:
+                        for c in children.get(x, ()):
+                            if c in seen_d:
+                                continue
+                            seen_d.add(c)
+                            nxt.append(c)
+                            q = rep_of(c)
+                            if q in targets and q not in kin:
+                                kin[q] = (1, up, down)
+                    level = nxt
+                if kin:
+                    break
+
+        own = reps.get(le_id) or lookup.get(le_id)
+        own_int = getattr(own, "_interaction_id", None)
+        keys = {}
+        for q in partners:
+            rq = reps.get(q) or lookup.get(q)
+            n, d = contact.get((le_id, q), (0, np.inf))
+            t = getattr(rq, "creation_time", np.nan)
+            keys[q] = (kin.get(q, (2, 0, 0)),
+                       0 if getattr(rq, "_interaction_id", None) == own_int else 1,
+                       -n, d,
+                       t if t == t else np.inf,
+                       q)
+        return keys
+
+    @staticmethod
+    def _children(partitioner: 'ParticlePartitioner') -> dict:
+        """Particle id -> its children's ids, made once per partitioner."""
+        ch = getattr(partitioner, "_le_children", None)
+        if ch is None:
+            ch = defaultdict(list)
+            for p in partitioner.particle_lookup.values():
+                par = p.parent_id
+                if par is not None and par != p.id:
+                    ch[par].append(p.id)
+            partitioner._le_children = ch
+        return ch

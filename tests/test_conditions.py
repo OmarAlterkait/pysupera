@@ -219,16 +219,23 @@ class TestCombineLEScatters:
         assert _same_partition(parts, 1, 2)
         assert _same_partition(parts, 2, 3)
 
-    def test_representative_is_largest_cloud(self):
-        # le2 has more points → should be representative after merge
+    def test_representative_is_the_earliest_created(self):
+        # the photon, not its larger photoelectron, represents the group
+        photon = make_particle(1, PT_IONIZATION, pdg=22, n_pts=3, offset=(0, 0, 0))   # LE
+        elec   = make_particle(2, PT_PHOTO_ELEC, pdg=11, parent_id=1, ancestor_id=1,
+                               n_pts=15, offset=(0.05, 0, 0))
+        photon.creation_time, elec.creation_time = 10.0, 12.0
+        prt = _part(elec, photon)
+        prt.partition(CombineLEScatters(), verbose=False)
+        assert prt.get_representative(2).id == prt.get_representative(1).id == 1
+
+    def test_representative_on_equal_times_is_the_smallest_id(self):
         le1 = make_particle(1, PT_IONIZATION, pdg=11, n_pts=3,  offset=(0,    0, 0))
         le2 = make_particle(2, PT_IONIZATION, pdg=11, n_pts=15, offset=(0.05, 0, 0))
-        prt = _part(le1, le2)
+        le1.creation_time = le2.creation_time = 4.0
+        prt = _part(le2, le1)
         prt.partition(CombineLEScatters(), verbose=False)
-        rep1 = prt.get_representative(1)
-        rep2 = prt.get_representative(2)
-        assert rep1.id == rep2.id   # same representative
-        assert rep1.id == 2         # le2 is representative (largest cloud)
+        assert prt.get_representative(2).id == 1
 
 
 # ============================================================================
@@ -282,38 +289,131 @@ class TestAbsorbLEScatter:
         assert _same_partition(parts, 1, 2)
 
 
-    def test_candidates_in_the_order_query_ball_tree_gave(self):
-        """
-        When a kLEScatter touches several reps and none is its home, the
-        first candidate wins, so get_rep_candidates must list them in the
-        order the query_ball_tree + set version did, not only the same set.
-        Points sit on a grid of pitch D, so many pairs are exactly D apart.
-        """
-        from types import SimpleNamespace as NS
-        from scipy.spatial import KDTree
-        rng = np.random.default_rng(5)
-        D = 3.0
+class TestAbsorbLEScatterChoice:
+    """
+    Which partner an LE piece touching several partitions goes to.  Each
+    test puts the rule under test against a later one that would choose
+    the other partner.  D = 0.6 throughout, so the partners (0.8 or more
+    apart) never touch each other.
+    """
+    D = 0.6
 
-        def rep(i, st):
-            c = (rng.integers(0, 12, (int(rng.integers(1, 30)), 3)) * D).astype(np.float32)
-            return NS(id=i, sem_type=st, _cloud_parts=[c])
-        reps = [rep(i, SemanticType.kLEScatter if i % 3 else SemanticType.kTrack)
-                for i in range(60)]
-        prt = NS(checker=NS(D=D), diagnostics=NS(record_candidates=lambda *a: None))
-        got = AbsorbLEScatter().get_rep_candidates(prt, {r.id: r for r in reps})
+    def absorb(self, *ps):
+        prt = _part(*ps, D=self.D)
+        prt.partition(AbsorbLEScatter(), verbose=False)
+        return prt
 
-        le = [r for r in reps if r.sem_type == SemanticType.kLEScatter]
-        ot = [r for r in reps if r.sem_type != SemanticType.kLEScatter]
-        lt = np.concatenate([np.full(len(r._cloud_parts[0]), k) for k, r in enumerate(le)])
-        tt = np.concatenate([np.full(len(r._cloud_parts[0]), k) for k, r in enumerate(ot)])
-        hits = KDTree(np.concatenate([r._cloud_parts[0] for r in le])).query_ball_tree(
-            KDTree(np.concatenate([r._cloud_parts[0] for r in ot])), r=D)
-        touching = set()
-        for i, js in enumerate(hits):
-            for j in js:
-                touching.add((int(lt[i]), int(tt[j])))
-        ref = [(le[i].id, ot[j].id) for i, j in touching]
-        assert len(ref) > 100 and got == ref
+    def test_nearest_ancestor_beyond_the_parent(self):
+        # the LE piece's parent is far away; its grandparent, a track, touches
+        track  = make_particle(1, PT_TRACK, pdg=13, pc=cloud([(x, 0, 0) for x in range(11)]))
+        parent = make_particle(2, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1,
+                               pc=cloud([(100, 0, 0)]))
+        le     = make_particle(3, PT_IONIZATION, pdg=11, parent_id=2, ancestor_id=1,
+                               pc=cloud([(5, 0.5, 0)]))
+        other  = make_particle(4, PT_PRIMARY, pdg=11, pc=cloud([(5, 0.8, 0)]))   # closer
+        prt = self.absorb(track, parent, le, other)
+        assert prt.get_representative(3).id == 1
+
+    def test_nearest_relative_when_no_ancestor_touches(self):
+        top     = make_particle(1, PT_PRIMARY, pdg=22, pc=cloud([(100, 0, 0)]))
+        parent  = make_particle(2, PT_PRIMARY, pdg=22, parent_id=1, ancestor_id=1,
+                                pc=cloud([(200, 0, 0)]))
+        le      = make_particle(3, PT_IONIZATION, pdg=11, parent_id=2, ancestor_id=1,
+                                pc=cloud([(0, 0, 0)]))
+        sibling = make_particle(4, PT_PRIMARY, pdg=11, parent_id=2, ancestor_id=1,
+                                pc=cloud([(0.5, 0, 0)]))
+        cousin  = make_particle(5, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1,
+                                pc=cloud([(-0.5, 0, 0)]))
+        stranger = make_particle(6, PT_PRIMARY, pdg=11, pc=cloud([(0, 0.3, 0)]))  # closest
+        prt = self.absorb(top, parent, le, sibling, cousin, stranger)
+        assert prt.get_representative(3).id == 4
+
+    def test_own_interaction_before_geometry(self):
+        le   = make_particle(1, PT_IONIZATION, pdg=11, interaction_id=0, pc=cloud([(0, 0, 0)]))
+        same = make_particle(2, PT_PRIMARY, pdg=11, interaction_id=0, pc=cloud([(0.5, 0, 0)]))
+        near = make_particle(3, PT_PRIMARY, pdg=11, interaction_id=1, pc=cloud([(0, 0.3, 0)]))
+        prt = self.absorb(le, same, near)
+        assert prt.get_representative(1).id == 2
+
+    def test_most_contact_before_closest_point(self):
+        le   = make_particle(1, PT_IONIZATION, pdg=11,
+                             pc=cloud([(0, 0, 0), (1, 0, 0), (2, 0, 0)]))
+        wide = make_particle(2, PT_PRIMARY, pdg=11, pc=cloud([(x, 0.5, 0) for x in range(3)]))
+        near = make_particle(3, PT_PRIMARY, pdg=11, pc=cloud([(0, -0.3, 0)]))
+        prt = self.absorb(le, wide, near)
+        assert prt.get_representative(1).id == 2
+
+    def test_closest_point_on_equal_contact(self):
+        le   = make_particle(1, PT_IONIZATION, pdg=11, pc=cloud([(0, 0, 0)]))
+        far  = make_particle(2, PT_PRIMARY, pdg=11, pc=cloud([(0.5, 0, 0)]))
+        near = make_particle(3, PT_PRIMARY, pdg=11, pc=cloud([(0, 0.4, 0)]))
+        prt = self.absorb(le, far, near)
+        assert prt.get_representative(1).id == 3
+
+    def test_earliest_creation_then_smallest_id(self):
+        def scene(t2, t3):
+            le = make_particle(1, PT_IONIZATION, pdg=11, pc=cloud([(0, 0, 0)]))
+            a  = make_particle(2, PT_PRIMARY, pdg=11, pc=cloud([(0.5, 0, 0)]))
+            b  = make_particle(3, PT_PRIMARY, pdg=11, pc=cloud([(-0.5, 0, 0)]))
+            a.creation_time, b.creation_time = t2, t3
+            return self.absorb(le, a, b).get_representative(1).id
+        assert scene(5.0, 2.0) == 3
+        assert scene(2.0, 5.0) == 2
+        assert scene(2.0, 2.0) == 2
+
+
+def _random_scene(seed, n=80):
+    """
+    LE pieces and showers on a coarse grid (so many distances tie), with a
+    random genealogy and two interactions.
+    """
+    rng = np.random.default_rng(seed)
+    ps = []
+    for i in range(n):
+        le = i % 3 != 0
+        par = int(rng.integers(0, i)) if i and rng.random() < 0.7 else i
+        k = int(rng.integers(1, 4 if le else 12))
+        pc = (rng.integers(0, 8, (k, 3)) * 0.5).astype(np.float32)
+        p = make_particle(i, PT_IONIZATION if le else PT_PRIMARY, pdg=11,
+                          parent_id=par, interaction_id=int(rng.integers(0, 2)), pc=pc)
+        p.creation_time = float(rng.integers(0, 3))
+        ps.append(p)
+    return ps
+
+
+class TestLEOrderIndependence:
+    """The same event, its particles listed in another order, partitions alike."""
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_combine_then_absorb(self, seed):
+        from pysupera.partitioner import ParticlePartitioner
+
+        def run(order):
+            ps = _random_scene(seed)
+            prt = ParticlePartitioner([ps[i] for i in order], distance_threshold=0.6,
+                                      backend="cpu-single", enable_diagnostics=False)
+            prt.partition_combined([CombineLEScatters(), AbsorbLEScatter()], verbose=False)
+            return {i: prt.get_representative(i).id for i in range(len(ps))}
+
+        n = len(_random_scene(seed))
+        ref = run(range(n))
+        rng = np.random.default_rng(100 + seed)
+        assert len(set(ref.values())) < n          # there were merges
+        for _ in range(3):
+            assert run(rng.permutation(n)) == ref
+
+    @pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 2, 0), (1, 0, 2)])
+    def test_combined_le_group_has_one_representative_in_any_order(self, order):
+        # A touches B, B touches C, A does not touch C; C is created first
+        a = make_particle(1, PT_IONIZATION, pdg=11, pc=cloud([(0, y, 0) for y in range(5)]))
+        b = make_particle(2, PT_IONIZATION, pdg=11, pc=cloud([(0.5, y, 0) for y in range(2)]))
+        c = make_particle(3, PT_IONIZATION, pdg=11, pc=cloud([(1.0, y, 3) for y in range(4)]))
+        c.point_cloud[0] = (1.0, 0, 0)
+        a.creation_time, b.creation_time, c.creation_time = 5.0, 3.0, 1.0
+        ps = [a, b, c]
+        prt = _part(*[ps[i] for i in order], D=0.6)
+        prt.partition(CombineLEScatters(), verbose=False)
+        assert {prt.get_representative(i).id for i in (1, 2, 3)} == {3}
 
 
 # ============================================================================

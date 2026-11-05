@@ -25,16 +25,20 @@ define the merged groups.
 
 Representative selection
 ------------------------
-Within each LEScatter group the particle with the **largest point cloud** is
-chosen as the representative (i.e. its scalar attributes — id, pdg, sem_type,
-ancestry — survive).  Point clouds of all group members are concatenated onto
-the representative.
+Within each LEScatter group the particle **created earliest** (Geant4 start
+time, ``creation_time``) is chosen as the representative (i.e. its scalar
+attributes — id, pdg, sem_type, ancestry — survive), and on equal times the
+smaller id.  Point clouds of all group members are concatenated onto the
+representative.
 
-Tie-breaking rule
------------------
-If two candidates have equal point-cloud sizes, the one with the higher
-**energy sum** (column ``PointFeature.energy = 4``) is kept as representative.
-If the column is absent the energy is treated as zero.
+The representative matters beyond its id: ``AbsorbLEScatter`` and the
+instance building read the group's genealogy from it.  An ancestor is
+created before its descendants, so a photon, not its photoelectron,
+represents a group holding both, and the group follows the photon into its
+shower.  The choice is made once per group of touching pieces
+(:meth:`CombineLEScatters.post_filter`), not pair by pair: merging pairs one
+after another would let the order they are applied in decide which piece
+ends up representing the group.
 """
 from __future__ import annotations
 
@@ -43,7 +47,7 @@ from typing import Dict, List, Tuple, TYPE_CHECKING
 import numpy as np
 
 from .base import PartitionConditionBase
-from ..utils import SemanticType, PointFeature
+from ..utils import SemanticType
 
 if TYPE_CHECKING:
     from ..partitioner import ParticlePartitioner
@@ -54,48 +58,17 @@ if TYPE_CHECKING:
 # Module-level helper
 # ---------------------------------------------------------------------------
 
-def _le_direction(a: 'Particle', b: 'Particle') -> Tuple['Particle', 'Particle']:
+def _rep_key(partitioner: 'ParticlePartitioner', pid: int) -> tuple:
     """
-    Return ``(child, parent)`` for a pair of ``kLEScatter`` particles.
-
-    The *parent* is the one whose scalar attributes (id, sem_type, etc.)
-    will survive the merge.  Selection priority:
-
-    1. Larger point cloud is parent.
-    2. On equal size: higher energy sum (``PointFeature.energy`` column) is parent.
-    3. On equal energy: ``a`` is parent (stable, arbitrary).
-
-    Parameters
-    ----------
-    a, b : Particle
-        Two ``kLEScatter`` representative particles to compare.
-
-    Returns
-    -------
-    tuple[Particle, Particle]
-        ``(child, parent)`` — child's cloud is appended to parent's cloud
-        and child's scalar attributes are discarded.
+    Sort key of a group member as its group's representative; the smallest
+    wins: the earliest Geant4 creation time (``creation_time``), then the
+    smallest id.  An ancestor is made before its descendants, so of a
+    lineage the ancestor represents the group -- which is what the
+    genealogy read from the representative later needs: the instance a
+    photon's group joins follows the photon, not its photoelectron.
     """
-    n_a = len(a.point_cloud)
-    n_b = len(b.point_cloud)
-
-    if n_a != n_b:
-        # Larger point cloud becomes the parent
-        return (b, a) if n_a > n_b else (a, b)
-
-    # Tie-break: energy sum
-    col = int(PointFeature.energy)
-
-    def _esum(p: 'Particle') -> float:
-        return float(p.point_cloud[:, col].sum()) if p.point_cloud.shape[1] > col else 0.0
-
-    e_a = _esum(a)
-    e_b = _esum(b)
-
-    # Higher energy → parent; tie → a is parent (stable)
-    if e_a >= e_b:
-        return (b, a)   # a is parent
-    return (a, b)       # b is parent
+    t = getattr(partitioner.particle_lookup[pid], "creation_time", np.nan)
+    return (t if t == t else np.inf, pid)
 
 
 # ---------------------------------------------------------------------------
@@ -118,11 +91,11 @@ class CombineLEScatters(PartitionConditionBase):
     --------
     1. ``get_candidates`` returns all unordered ``kLEScatter`` pairs for the
        initial (particle-level) proximity pass.
-    2. ``get_rep_candidates`` returns directed ``(child, parent)`` pairs
-       among current ``kLEScatter`` representatives, re-evaluated on every
-       convergence pass.  The parent is chosen by the largest-PC /
-       highest-energy rule described in :func:`_le_direction`.
-    3. No ``post_filter`` override — every touching LEScatter pair is merged.
+    2. ``get_rep_candidates`` returns the touching pairs among current
+       ``kLEScatter`` representatives, re-evaluated on every convergence
+       pass.
+    3. ``post_filter`` merges every group of touching LEScatter pieces into
+       one representative chosen for the whole group (:func:`_rep_key`).
     """
 
     @property
@@ -139,6 +112,46 @@ class CombineLEScatters(PartitionConditionBase):
     # ------------------------------------------------------------------
     # PartitionConditionBase interface
     # ------------------------------------------------------------------
+
+    def post_filter(self,
+                    partitioner: 'ParticlePartitioner',
+                    touching_pairs: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """
+        Merge each group of touching ``kLEScatter`` pieces into one
+        representative.
+
+        The groups are the connected components of *touching_pairs*, so
+        they do not depend on the pairs' order.  Each group's
+        representative is its member with the smallest :func:`_rep_key`,
+        and every other member is merged into it.
+
+        Returns
+        -------
+        list of tuple[int, int]
+            ``(member_id, representative_id)`` for every member that is not
+            its group's representative.
+        """
+        root: Dict[int, int] = {}
+
+        def find(x):
+            root.setdefault(x, x)
+            while root[x] != x:
+                root[x] = root[root[x]]
+                x = root[x]
+            return x
+
+        for a, b in touching_pairs:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                root[max(ra, rb)] = min(ra, rb)
+        groups: Dict[int, List[int]] = {}
+        for x in root:
+            groups.setdefault(find(x), []).append(x)
+        merges = []
+        for members in groups.values():
+            rep = min(members, key=lambda m: _rep_key(partitioner, m))
+            merges.extend((m, rep) for m in sorted(members) if m != rep)
+        return sorted(merges)
 
     def get_candidates(
             self, partitioner: 'ParticlePartitioner') -> List[Tuple[int, int]]:
@@ -175,15 +188,15 @@ class CombineLEScatters(PartitionConditionBase):
             partitioner: 'ParticlePartitioner',
             rep_lookup: Dict[int, 'Particle']) -> List[Tuple[int, int]]:
         """
-        Return directed ``(child_rep_id, parent_rep_id)`` pairs among the
-        current unique ``kLEScatter`` representatives.
+        Return the touching pairs among the current unique ``kLEScatter``
+        representatives.
 
         Called on every convergence pass so that newly consolidated
         representatives (with grown point clouds) are re-evaluated for
         further merges.
 
-        Direction rule: the representative with the larger point cloud is
-        the parent; ties are broken by energy sum (see :func:`_le_direction`).
+        The pairs carry no direction: :meth:`post_filter` chooses each
+        group's representative.
 
         Parameters
         ----------
@@ -194,7 +207,7 @@ class CombineLEScatters(PartitionConditionBase):
         Returns
         -------
         list of tuple[int, int]
-            ``(child_rep_id, parent_rep_id)`` for all unique pairs.
+            ``(rep_id_a, rep_id_b)`` for all unique pairs.
         """
         # Collect unique kLEScatter representatives from the live partition
         # state.  Using unique_reps() rather than iterating partitioner.particles
@@ -265,8 +278,7 @@ class CombineLEScatters(PartitionConditionBase):
 
         candidates: List[Tuple[int, int]] = []
         for i, j in rep_pairs:
-            child, parent = _le_direction(unique_le[i], unique_le[j])
-            candidates.append((child.id, parent.id))
+            candidates.append((unique_le[i].id, unique_le[j].id))
 
         partitioner.diagnostics.record_candidates(
             f"{self.name}: Rep Candidate Building", candidates

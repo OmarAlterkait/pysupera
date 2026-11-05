@@ -668,8 +668,8 @@ files read as before.
   data LE is 22–29% of points and 6–8% of the energy (3.3.0: 35–43% of
   points, most of it Compton blobs merged into photon fragments).
 - **Low-energy pieces go where they came from.** `AbsorbLEScatter` absorbs an
-  LE particle touching several things into its own ancestor when that is one
-  of them, so a delta ray goes to its track. A stand-alone piece that
+  LE particle touching several things into its nearest ancestor among them,
+  so a delta ray goes to its track. A stand-alone piece that
   defragmentation cut off a `kTrack`, `kMichel` or `kDelta` particle joins
   that particle's instance and is not LE. Optionally, a delta ray that
   never gets far from its track joins it too (see
@@ -1988,8 +1988,9 @@ of `sdf_data_03` (pixel, EDepSim only) and `sdf_data_03_wire`:
 - `cpu_single` builds per-particle KD-trees only on demand, since
   partition-level proximity never uses them (see [Compute Backends](#compute-backends));
 - `AbsorbLEScatter` finds touching pairs with one `sparse_distance_matrix`
-  and NumPy instead of `query_ball_tree` and a Python loop, keeping the
-  candidate order (see [`AbsorbLEScatter`](#absorblescatter)).
+  and NumPy instead of `query_ball_tree` and a Python loop. (It kept the
+  candidate order, which then still decided merges; since November 2026
+  nothing does, see [`AbsorbLEScatter`](#absorblescatter).)
 
 Timings are for 20 events, mean of 2 alternating serial runs. The two runs
 agreed within 2%.
@@ -2149,10 +2150,26 @@ Only the touching subset proceeds to `post_filter`, and only the final `merge_pa
 
 **Candidate filter:** All pairs of distinct `kLEScatter` partition representatives.
 
-**Merge direction (tie-breaking, `_le_direction`):**
-1. Larger point cloud becomes the parent.
-2. On equal size: higher energy sum (column `PointFeature.energy`) wins.
-3. On equal energy: stable arbitrary tie-break.
+**Representative:** The pieces that touch, directly or through others, become
+one partition, and its representative is chosen once for the whole group: the
+member created earliest (Geant4 start time), then the smaller id.
+
+The representative's genealogy is the group's: `AbsorbLEScatter` ranks
+partners by it, and the instance building walks its parents. An ancestor is
+created before its descendants, so of a photon and its photoelectron the
+photon represents the group, and the group follows the photon into its
+shower. A photoelectron there would stop the walk, since a photon's
+secondaries join a shower only through their photon.
+
+Until November 2026 the direction was decided pair by pair, the piece with
+more points becoming the parent, and the pairs were applied one after another,
+so their order could decide the representative: in a chain A–B–C with B the
+smallest, whichever of A and C came second represented all three. The energy
+tie-break it documented never applied, because a representative's cloud holds
+only x, y, z. Most EDepSim LE pieces are one point, so sizes tied and the
+piece listed first won, which was mostly the ancestor, by accident. Choosing
+the largest piece instead took 70% of the EDepSim LE points out of their
+showers, which is what showed that the genealogy, not the size, has to decide.
 
 **When to run:** Before `AbsorbLEScatter`.
 
@@ -2164,14 +2181,17 @@ Only the touching subset proceeds to `post_filter`, and only the final `merge_pa
 
 **Candidate filter:** All pairs between `kLEScatter` representatives and non-`kLEScatter` representatives.
 
-**Post-filter:** One merge per `kLEScatter` — if multiple non-LE neighbours touch the same LE partition, the one holding its nearest ancestor outside it is kept when it is among them (a delta ray goes to its track, not to a shower crossing it), otherwise the first passing pair.
+**Post-filter:** One merge per `kLEScatter`. When an LE partition touches several non-LE partitions, it goes to the first of these that leaves one:
 
-"First" is the order the candidates are listed in, so it decides real merges.
-The touching pairs come from one KD-tree search over all points
-(`sparse_distance_matrix`) and are deduplicated to representative pairs in the
-order the earlier `query_ball_tree` version produced them: by `kLEScatter`
-point, then by the other point.  The candidate list is therefore the same,
-element for element.
+1. **Nearest ancestor** — the partition holding its parent, else its grandparent, and so on up the chain. A low-energy piece goes where it came from: a delta ray to its track, not to a shower crossing it.
+2. **Nearest relative** — the partition holding the particle it shares the nearest common ancestor with: fewest steps up, then fewest down (a sibling's shower before a cousin's). Ancestors come first, so a piece never goes to its own descendant over its parent.
+3. **Its own interaction** — a partition of the same interaction. Merging across interactions is allowed, but only when nothing of its own touches.
+4. **Most contact** — the most LE points within D of the partner.
+5. **Closest point.**
+6. **Earliest creation** — the Geant4 start time of the partner's representative.
+7. **Smallest id** — only for an exact time tie: particles made in one Geant4 step, or primaries of one vertex.
+
+The genealogy is that of the LE partition's representative (see [`CombineLEScatters`](#combinelescatters)). Every key is a property of the event, so the result does not depend on the order particles or candidates are listed in. Until November 2026 a piece whose parent's partition did not touch took the first pair of a set of list positions: any change elsewhere in the event, even a particle with no points changing type, reordered it. On 20 pixel events that was 38% of the LE pieces touching more than one partition, and 19% with EDepSim deposits; 87–88% of those had a grandparent or a more distant ancestor among the partners.
 
 **Merge direction:** `kLEScatter` representative → non-`kLEScatter` representative.
 
@@ -2214,9 +2234,9 @@ Diagnostics add a per-pair record overhead.  With diagnostics disabled (the defa
 
 4. **`_cloud_parts` attribute** — The incremental algorithm attaches `_cloud_parts` to each representative `Particle` object (a `list[ndarray]` of point-cloud chunks used for deferred concatenation).  This attribute is an internal implementation detail of the partitioner and is not serialised to HDF5.
 
-5. **Point cloud columns** — Columns 0–2 are always treated as x, y, z.  Additional columns (time, energy deposit, dEdx, etc.) are carried through the pipeline unchanged but are not used by any proximity or condition logic except for the energy tie-break in `CombineLEScatters` (column index 4, `PointFeature.energy`).
+5. **Point cloud columns** — Columns 0–2 are always treated as x, y, z.  Additional columns (time, energy deposit, dEdx, etc.) are carried through the pipeline unchanged but are not used by any proximity or condition logic.
 
-6. **`kLEScatter` ordering** — when an LE partition's own ancestor is not among its touching neighbours, `AbsorbLEScatter` takes the *first* touching non-LE neighbour in the order candidates are iterated, which depends on the ordering of `rep_lookup`.  This is deterministic within a single run but may vary across Python versions or dict iteration orders in unusual environments.
+6. **Order independence** — no condition's result depends on the order particles or candidates are listed in: `AbsorbLEScatter` ranks partners by genealogy, interaction, geometry and creation time, and `CombineLEScatters` chooses each group's representative from the whole group. `tests/test_conditions.py::TestLEOrderIndependence` checks it with shuffled particle lists.
 
 7. **Convergence** — The pass loop terminates when no new merges occur in a complete pass.  The loop is capped at `max_passes=10` as a safety guard.  In practice, 1–2 passes are sufficient for typical LArTPC events.
 
