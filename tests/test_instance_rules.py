@@ -197,7 +197,7 @@ class TestBuriedDeltaRays:
         ig = snapshot_groups(merge_em_showers(frags))
         lay = build_layout([mu, d], fg, ig, keep={2})
         c = lay.columns
-        r = {int(i): k for k, i in enumerate(c["id"])}
+        r = lay.row_of                    # partitioner id -> row (= id written)
         assert set(r) == {1, 2}
         assert c["sem_type"][r[2]] == ST.kDelta.value
         # It heads no group (frag_id/inst_id are set on heads only); its
@@ -209,7 +209,7 @@ class TestBuriedDeltaRays:
         assert lo <= c["pc_start"][r[2]] < c["pc_end"][r[2]] <= hi
         assert hi - lo == len(mu.point_cloud) + len(d.point_cloud)
         # Without keep it would have no row: it heads no group any more.
-        assert 2 not in build_layout([mu, d], fg, ig).columns["id"].tolist()
+        assert 2 not in build_layout([mu, d], fg, ig).row_of
 
     def test_a_visible_one_keeps_its_own_fragment(self):
         # 3 cells (9 mm) off the muon.
@@ -288,8 +288,8 @@ class TestAbsorbedDeltaRays:
         relabel_absorbed_deltas(found)
         assert d.sem_type == ST.kDelta and d.buried_in_track
         assert fragment_le([mu, d], fg) == {1: False, 2: False}
-        c = build_layout([mu, d], fg, ig, keep={2}).columns
-        r = {int(i): k for k, i in enumerate(c["id"])}
+        lay = build_layout([mu, d], fg, ig, keep={2})
+        c, r = lay.columns, lay.row_of
         assert c["sem_type"][r[2]] == ST.kDelta.value
         assert c["frag_id"][r[2]] == -1 and c["inst_id"][r[2]] == -1
         assert c["pc_end"][r[2]] - c["pc_start"][r[2]] == 2

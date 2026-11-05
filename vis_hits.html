@@ -825,12 +825,12 @@ function kinRows(gid){
   out.push(['end [mm]', xyz(q('end_pos'))]);
   const pe = v => `${fmt(Math.hypot(v[0], v[1], v[2]), 2)} · ${fmt(v[3], 2)} MeV`;
   const lp = q('last_pos');
-  if(Number.isNaN(fp[0])) out.push(['inst. first', '—']);
+  if(Number.isNaN(fp[0])) out.push(['first', '—']);
   else {
-    out.push(['inst. first [mm]', `${xyz(fp)}  (+${fmt(Math.hypot(fp[0]-sp[0], fp[1]-sp[1], fp[2]-sp[2]), 1)})`],
+    out.push(['first [mm]', `${xyz(fp)}  (+${fmt(Math.hypot(fp[0]-sp[0], fp[1]-sp[1], fp[2]-sp[2]), 1)})`],
              ['|p| · E first', pe(q('first_mom'))]);
-    if(Number.isNaN(lp[0])) out.push(['inst. last', '— (shower)']);
-    else out.push(['inst. last [mm]', xyz(lp)], ['|p| · E last', pe(q('last_mom'))]);
+    if(Number.isNaN(lp[0])) out.push(['last', '— (shower)']);
+    else out.push(['last [mm]', xyz(lp)], ['|p| · E last', pe(q('last_mom'))]);
   }
   return out;
 }

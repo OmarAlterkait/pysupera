@@ -378,7 +378,7 @@ class TestRangesHoldOnlyOwnRows:
         a1.member_ids, b2.member_ids = [1, 3], [2]
         frags = snapshot_groups([a1, b2])
         lay = build_layout([a1, b2, a3], frags, [])
-        cols = {int(i): k for k, i in enumerate(lay.columns["id"])}
+        cols = lay.row_of
         # the empty fragment gets no row, and no range anywhere claims more
         # than the 5 rows that exist
         assert 1 not in cols
@@ -403,8 +403,7 @@ class TestRangesHoldOnlyOwnRows:
         frags = snapshot_groups([b, c])
         insts = snapshot_groups([b, c])
         lay = build_layout([b, a, c], frags, insts)
-        col, row = lay.columns, {int(i): k for k, i in
-                                 enumerate(lay.columns["id"])}
+        col, row = lay.columns, lay.row_of
         rb = row[1]
         # a's points are b's: inside b's fragment, and -- b's fragment being
         # a track -- on the non-LE side of b's instance
@@ -478,10 +477,11 @@ class TestGroupOfPoints:
             inst = v.group_of_points("inst")
             assert len(frag) == len(v.points) == len(inst)
             # chain_event: fragment {1, 2} (5 points), fragment {3} (4),
-            # one instance headed by 1 holding all 9
+            # one instance headed by 1 holding all 9 -- named by their rows
+            row = {int(t): k for k, t in enumerate(v["geant4_trackid"])}
             assert sorted(np.unique(frag, return_counts=True)[1].tolist()) == [4, 5]
-            assert set(frag.tolist()) == {1, 3}
-            assert (inst == 1).all()
+            assert set(frag.tolist()) == {row[1], row[3]}
+            assert (inst == row[1]).all()
 
 class TestPointsStorage:
     """How points/flat is stored: invisible to a reader, apart from precision."""
@@ -596,9 +596,10 @@ class TestColumnsAndHitLabels:
         parts, frags, insts = chain_event()
         lay = build_layout(parts, frags, insts)
         c = lay.columns
-        row = {int(i): k for k, i in enumerate(c["id"])}
+        row = lay.row_of
         # chain_event: fragments {1, 2} and {3} both inside instance 1
-        assert c["frag_inst_id"][row[1]] == 1 and c["frag_inst_id"][row[3]] == 1
+        assert c["frag_inst_id"][row[1]] == row[1]
+        assert c["frag_inst_id"][row[3]] == row[1]
 
     def test_keep_gives_a_row_to_a_pointless_fragment(self):
         """
@@ -610,7 +611,7 @@ class TestColumnsAndHitLabels:
         for p in parts:
             if int(p.id) == 1:
                 p.parent_id = 1
-        ids = lambda lay: {int(i) for i in lay.columns["id"]}
+        ids = lambda lay: set(lay.row_of)
         assert 0 not in ids(build_layout(parts, frags, insts))
         assert 0 in ids(build_layout(parts, frags, insts, keep={0}))
 
@@ -656,7 +657,7 @@ class TestLeIsDecidedPerFragment:
                     int(v["inst_pc_end"][r]))
         assert (sp - a, e - sp) == (5, 4)        # 1 + absorbed 2, then blob 3
         assert v.is_le_point().sum() == 4
-        row = {int(i): k for k, i in enumerate(v["id"])}
+        row = {int(t): k for k, t in enumerate(v["geant4_trackid"])}
         assert len(v.points_of(row[1], "frag")) == 5
         assert len(v.points_of(row[1], "frag", le=True)) == 0
         assert len(v.points_of(row[3], "frag", le=True)) == 4
@@ -776,3 +777,114 @@ class TestKinematics:
             v = s[0]
         assert v["start_pos"].shape == (len(v), 4)
         assert np.isnan(v["start_pos"]).all() and np.isnan(v["mass"]).all()
+
+
+def sparse_chain_event(shift=(10, 13, 17, 20)):
+    """
+    chain_event with partitioner ids that are not rows -- gaps and an offset,
+    as a real event's are once most particles get no row -- plus an
+    unwritten LE blob (id 30) with points of its own inside photon 13's
+    fragment.
+    """
+    m = dict(enumerate(shift))
+    pi0 = make_particle(m[0], PT_PRIMARY, pdg=111, parent_id=m[0], ancestor_id=m[0],
+                        pc=np.zeros((0, 6), dtype=np.float32), interaction_id=0)
+    g1 = make_particle(m[1], PT_TRACK, pdg=22, parent_id=m[0], ancestor_id=m[0],
+                       n_pts=3, interaction_id=0)
+    g2 = make_particle(m[2], PT_TRACK, pdg=11, parent_id=m[1], ancestor_id=m[0],
+                       n_pts=2, interaction_id=0)
+    e3 = make_particle(m[3], PT_TRACK, pdg=11, parent_id=m[1], ancestor_id=m[0],
+                       n_pts=4, interaction_id=0)
+    blob = make_particle(30, PT_TRACK, pdg=11, parent_id=m[3], ancestor_id=m[0],
+                         n_pts=1, interaction_id=0)
+    g1.member_ids = [m[1], m[2], 30]
+    e3.member_ids = [m[3]]
+    pi0.member_ids = [m[0]]
+    frags = snapshot_groups([pi0, g1, e3])
+    g1.member_ids = [m[0], m[1], m[2], m[3], 30]
+    insts = snapshot_groups([g1])
+    return [pi0, g1, g2, e3, blob], frags, insts
+
+
+class TestIdsAreRows:
+    """4.2: an id is its row within the event, and every id names a row."""
+
+    def test_id_is_the_row(self):
+        lay = build_layout(*sparse_chain_event())
+        assert lay.columns["id"].tolist() == list(range(len(lay.rows)))
+
+    def test_every_id_column_names_a_row_or_is_minus_one(self):
+        from pysupera.layout import ID_COLUMNS
+        lay = build_layout(*sparse_chain_event())
+        n = len(lay.rows)
+        for name in ID_COLUMNS:
+            v = lay.columns[name]
+            assert ((v == -1) | ((v >= 0) & (v < n))).all(), name
+
+    def test_genealogy_and_groups_survive_the_renumbering(self):
+        lay = build_layout(*sparse_chain_event())
+        c, r = lay.columns, lay.row_of
+        # partner 17 (a fragment member, not its head) and the blob have no row
+        assert set(r) == {10, 13, 20}
+        # same particle, now by row: photon 13's parent is pi0 10, and so on
+        assert c["parent_id"][r[13]] == r[10] and c["parent_id"][r[10]] == r[10]
+        assert c["parent_id"][r[20]] == r[13]
+        assert (c["ancestor_id"] == r[10]).all()
+        assert c["frag_id"][r[13]] == r[13] and c["frag_id"][r[10]] == r[10]
+        assert c["inst_id"][r[13]] == r[13]
+        assert c["frag_inst_id"][r[13]] == r[13] and c["frag_inst_id"][r[20]] == r[13]
+        assert c["inst_parent_id"][r[13]] == r[13]
+        # a row's own Geant4 identity is untouched
+        assert c["geant4_trackid"][r[20]] == 20
+
+    def test_to_rows_maps_written_ids_and_drops_the_rest(self):
+        lay = build_layout(*sparse_chain_event())
+        r = lay.row_of
+        out = lay.to_rows([13, 30, -1, 20, 999])
+        assert out.tolist() == [r[13], -1, -1, r[20], -1]
+        assert lay.to_rows([]).tolist() == []
+
+    def test_a_reader_indexes_rows_with_ids(self, tmp_path):
+        path = write(tmp_path, events=[sparse_chain_event(), sparse_chain_event()])
+        with read_events_v3(path) as s:
+            for ev in range(2):
+                v = s[ev]
+                g4 = v["geant4_trackid"]
+                assert v["id"].tolist() == list(range(len(g4)))
+                # the parent's pdg is one index away
+                k = int(np.flatnonzero(g4 == 20)[0])
+                assert v["pdg"][v["parent_id"][k]] == 22
+                assert g4[v["parent_id"][k]] == 13
+
+
+class TestFirstLastOnGroupRows:
+    """
+    first_* / last_*: an instance row holds its instance's, any other
+    fragment row its fragment's (4.2), every other row NaN.
+    """
+
+    def kin(self, v):
+        return {n: np.full(4, float(v)) for n in
+                ("first_pos", "first_mom", "last_pos", "last_mom")}
+
+    def test_each_row_takes_its_own_level(self):
+        parts, frags, insts = sparse_chain_event()
+        lay = build_layout(parts, frags, insts,
+                           inst_kinematics={13: self.kin(1)},
+                           frag_kinematics={13: self.kin(2), 20: self.kin(3),
+                                            10: self.kin(4)})
+        c, r = lay.columns, lay.row_of
+        assert (c["first_pos"][r[13]] == 1).all()      # heads the instance
+        assert (c["last_mom"][r[20]] == 3).all()       # heads only a fragment
+        assert (c["first_pos"][r[10]] == 4).all()      # pi0's own (empty) fragment
+        assert c["first_pos"].shape == (len(lay.rows), 4)
+
+    def test_rows_heading_nothing_stay_nan(self):
+        parts, frags, insts = chain_event()
+        lay = build_layout(parts, frags, insts,
+                           inst_kinematics={1: self.kin(1)},
+                           frag_kinematics={0: self.kin(2), 3: self.kin(3)})
+        c = lay.columns
+        heads = (c["frag_id"] == c["id"]) | (c["inst_id"] == c["id"])
+        assert np.isnan(c["first_pos"][~heads]).all()
+        assert not np.isnan(c["first_pos"][heads]).any()

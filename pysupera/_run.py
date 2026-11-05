@@ -449,32 +449,6 @@ def main(cfg: DictConfig) -> None:
                 for _k, _p in enumerate(particles):
                     _p.id = _k
 
-                # ── Voxel mapping ──────────────────────────────────────────
-                # Built from the final particle list, so split particles carry
-                # their own share of the mapping and dropped ones contribute
-                # nothing.  Records are rebuilt here rather than reused from
-                # voxelizer.last_diagnostics, which still describes the
-                # pre-defragmentation list.
-                if _write_voxmap:
-                    _t = time.perf_counter()
-                    from pysupera.preproc import VoxelizeRecord
-                    _recs = []
-                    for _p in particles:
-                        _vm = getattr(_p, 'voxmap', None)
-                        if _vm is None:
-                            continue
-                        _off, _ids = _vm
-                        _recs.append(VoxelizeRecord(
-                            particle_id    = int(_p.id),
-                            n_before       = int(len(_ids)),
-                            n_after        = int(len(_off) - 1),
-                            input_ids      = _ids,
-                            voxel_offsets  = _off,
-                        ))
-                    vox_writer.append_event(_recs)
-                    _ev_t['write_voxmap'] = time.perf_counter() - _t
-                    profile['write_voxmap'] += _ev_t['write_voxmap']
-
                 # ── Interaction-ID completeness ─────────────────────────────
                 # Runs after resolve_orphans so the parent chains reported in
                 # the diagnostic are the repaired ones.
@@ -758,8 +732,9 @@ def main(cfg: DictConfig) -> None:
                 _keep.update(int(_p.id) for _p in _absorbed)
                 stats['n_absorbed_deltas'].append(len(_absorbed))
                 # first_* / last_* per instance, from the steps whose
-                # deposits it collected.
-                _inst_kin = None
+                # deposits it collected, and the same per fragment for the
+                # fragment rows that head no instance.
+                _inst_kin = _frag_kin = None
                 _st = getattr(store, 'last_steps', None)
                 _tk = getattr(store, 'last_kinematics', None)
                 if _st is not None and _tk is not None:
@@ -769,16 +744,54 @@ def main(cfg: DictConfig) -> None:
                     _inst_kin = instance_kinematics(
                         _inst_groups, particles, _st['steps'], _st['owner'],
                         _spid, _tk, counted=_st.get('counted'))
+                    _heads = {int(_g.rep_id) for _g in _inst_groups}
+                    _frag_kin = instance_kinematics(
+                        [_g for _g in _frag_groups if int(_g.rep_id) not in _heads],
+                        particles, _st['steps'], _st['owner'],
+                        _spid, _tk, counted=_st.get('counted'))
                 _layout = build_layout(particles, _frag_groups, _inst_groups,
                                        vertices=getattr(store, 'last_vertices', None),
                                        keep=_keep,
                                        kinematics=_tk,
-                                       inst_kinematics=_inst_kin)
+                                       inst_kinematics=_inst_kin,
+                                       frag_kinematics=_frag_kin)
                 writer.append_event(_layout)
+                # ── Voxel mapping ──────────────────────────────────────────
+                # Built from the final particle list, so split particles carry
+                # their own share of the mapping and dropped ones contribute
+                # nothing.  Written after the layout, so each particle is named
+                # by its row in the output (its id there), -1 when it has none.  Records are rebuilt here rather than reused from
+                # voxelizer.last_diagnostics, which still describes the
+                # pre-defragmentation list.
+                if _write_voxmap:
+                    _t = time.perf_counter()
+                    from pysupera.preproc import VoxelizeRecord
+                    _recs = []
+                    _vrow = _layout.to_rows([int(_p.id) for _p in particles])
+                    for _p, _r in zip(particles, _vrow.tolist()):
+                        _vm = getattr(_p, 'voxmap', None)
+                        if _vm is None:
+                            continue
+                        _off, _ids = _vm
+                        _recs.append(VoxelizeRecord(
+                            particle_id    = int(_r),
+                            n_before       = int(len(_ids)),
+                            n_after        = int(len(_off) - 1),
+                            input_ids      = _ids,
+                            voxel_offsets  = _off,
+                        ))
+                    vox_writer.append_event(_recs)
+                    _ev_t['write_voxmap'] = time.perf_counter() - _t
+                    profile['write_voxmap'] += _ev_t['write_voxmap']
+
                 _sources.append(getattr(store, 'last_input', None) or 0,
                                 getattr(store, 'last_input_event', event_idx),
                                 getattr(store, 'last_jaxtpc_entry', None))
                 if _labels is not None:
+                    # Partitioner ids -> the ids written: rows of this event.
+                    for _d in _labels:
+                        _d['fragment_id'] = _layout.to_rows(_d['fragment_id'])
+                        _d['instance_id'] = _layout.to_rows(_d['instance_id'])
                     writer.append_hit_labels(_labels)
 
                 if _owner is None:
@@ -787,14 +800,15 @@ def main(cfg: DictConfig) -> None:
                     # Record the fragment, not the particle: only a fraction
                     # of particles get a row, so a particle id would often
                     # name something the reader cannot resolve.  Every
-                    # fragment with points does get one.  The instance is
-                    # left out entirely -- it follows from the fragment.
+                    # fragment with points does get one (one without would be
+                    # written -1).  The instance is left out entirely -- it
+                    # follows from the fragment.
                     _frag_of = {int(m): int(g.rep_id)
                                 for g in _frag_groups for m in g.member_ids}
                     # LE per fragment, as in points/flat and hit_labels.
                     _le_of = fragment_le(particles, _frag_groups)
                     writer.append_group_owners(
-                        remap_owners(_owner, _frag_of),
+                        _layout.to_rows(remap_owners(_owner, _frag_of)),
                         le_flags(_owner, _le_of),
                         getattr(store, 'last_group_volume_offsets', ()))
                 _ev_t['write_ev'] = time.perf_counter() - _t

@@ -1,5 +1,5 @@
 """
-Writer and reader for the 4.x on-disk format (4.1.0 written).
+Writer and reader for the 4.x on-disk format (4.2.0 written).
 
 One particle table, and each point stored exactly once.  See
 :mod:`pysupera.layout` for how a single event's ordering, row selection and
@@ -11,7 +11,7 @@ Layout
 ------
 ::
 
-    format_version   scalar str  "4.1.0"
+    format_version   scalar str  "4.2.0"
     n_events         scalar int64
     events/offsets   (n_events+1,) int64   particle rows per event
     events/input, events/input_event, events/jaxtpc_entry, inputs/*
@@ -43,8 +43,17 @@ Layout
 
 Index conventions
 -----------------
-``id``, ``parent_id``, ``ancestor_id``, ``frag_id`` and ``inst_id`` are
-**per-event** particle indices: row ``events/offsets[ev] + id``.
+``id`` is the particle's **row within its event** (4.2): row
+``events/offsets[ev] + id`` of the particle table, ``0 ... n-1`` in each event,
+so ``v["pdg"][v["parent_id"]]`` is the parent's pdg.  ``parent_id``,
+``ancestor_id``, ``frag_id``, ``inst_id``, ``frag_parent_id``,
+``inst_parent_id`` and ``frag_inst_id`` are ids too, and so are
+``groups/fragment_id`` and the ``fragment_id`` / ``instance_id`` of
+``hit_labels``: each names a row of the same event, or is ``-1``.  Only some
+of the partitioner's particles get a row, and they are numbered once the rows
+are chosen; join back to the input on ``geant4_trackid``, never on ``id``.
+Before 4.2 an id was the particle's index in the partitioner's full list, not
+a row: read a 4.1 file through a ``{id: row}`` map.
 
 Point ranges (``pc_*``, ``frag_pc_*``, ``inst_pc_*``) are stored **absolute**
 into ``points/flat``, so a whole-file reader can slice them with no arithmetic.
@@ -95,7 +104,9 @@ from .utils import SemanticType as _ST
 
 _LE_CODE = _ST.kLEScatter.value
 
-FORMAT_VERSION_V3 = "4.1.0"
+#: 4.2.0: a particle id is its row within the event (4.1 and earlier: its
+#: index in the partitioner's full list, so not a row).
+FORMAT_VERSION_V3 = "4.2.0"
 
 #: points/flat's columns when nothing else is given: a deposit, as the plain
 #: EDepSim reader produces it.  JAXTPC input adds direction and momentum.
@@ -692,8 +703,9 @@ class EventStoreV3:
         ``(None, None, None)`` when the file carries no group table
         (non-JAXTPC runs).
 
-        Indexed by event-global group number; ``fragment_id`` is -1 where no
-        stored fragment claims the group.  The owning *instance* is not
+        Indexed by event-global group number; ``fragment_id`` is the owning
+        fragment's id (its row in the event), -1 where no stored fragment
+        claims the group.  The owning *instance* is not
         stored -- derive it with
         :func:`pysupera.provenance.instance_of_groups`.  *volume_offsets* says where
         each volume's groups begin, so a plane's local group number can be

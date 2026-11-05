@@ -5,7 +5,10 @@ One ``particles`` table plus one flat point array.  A particle row carries its
 own identity and kinematics and, when it represents a group, that group's
 columns as well:
 
-    frag_id / inst_id    the *particle id of the group's representative*.
+    id                   the row's index within its event (4.2): ``id == k``
+                         for the event's k-th row, so an id indexes the
+                         event's rows directly.
+    frag_id / inst_id    the *id of the group's representative*.
                          A representative therefore satisfies ``frag_id == id``,
                          which is how the levels are enumerated.  ``-1`` means
                          the particle heads no group at that level.
@@ -46,6 +49,14 @@ unwritten instance, whose members sorted apart, claimed the rows of the
 particles between them -- and it would again for a group whose members span
 two interactions.
 
+*Ids are rows.*  The partitioner numbers every particle of the event; only
+some get a row.  Once the rows are chosen, every id column --
+:data:`ID_COLUMNS` -- is rewritten to row indices, so ``parent_id``,
+``frag_id`` and the rest index the event's rows directly.  Every id written
+names a row; arrays written after the layout (hit_labels, the group table,
+the voxmap) go through :meth:`EventLayout.to_rows`, which gives ``-1`` for
+a particle with no row.
+
 *Walkable genealogy.*  Only a fraction of Geant4 particles are stored, so a
 stored particle's true parent may be absent.  ``parent_id`` is therefore
 redirected to the nearest *stored* ancestor, and a particle with no stored
@@ -65,6 +76,10 @@ from .utils import SemanticType as _ST
 #: block followed by an LE block; see build_layout.
 _LE_SEM = _ST.kLEScatter
 
+#: Columns holding particle ids.  build_layout rewrites them to row indices.
+ID_COLUMNS = ("id", "parent_id", "ancestor_id", "frag_id", "inst_id",
+              "frag_parent_id", "inst_parent_id", "frag_inst_id")
+
 #: Kinematic columns, each (rows, 4) float64.
 KINEMATICS_COLUMNS = ("start_pos", "start_mom", "first_pos", "first_mom",
                       "last_pos", "last_mom", "end_pos", "end_mom")
@@ -73,7 +88,8 @@ KINEMATICS_COLUMNS = ("start_pos", "start_mom", "first_pos", "first_mom",
 #: :func:`pysupera.readers.format_edepsim_h5.particle_kinematics`.
 TRACK_KINEMATICS_COLUMNS = ("start_pos", "start_mom", "end_pos", "end_mom")
 
-#: The ones an instance row takes from its instance; see
+#: The ones a group's row takes from its group: an instance row its
+#: instance's, any other fragment row its fragment's; see
 #: :func:`pysupera.kinematics.instance_kinematics`.
 INSTANCE_KINEMATICS_COLUMNS = ("first_pos", "first_mom", "last_pos",
                                "last_mom")
@@ -126,10 +142,10 @@ class EventLayout:
     """Result of :func:`build_layout` for one event."""
 
     __slots__ = ("order", "rows", "pc_offsets", "columns", "n_points",
-                 "interactions")
+                 "interactions", "row_of")
 
     def __init__(self, order, rows, pc_offsets, columns, n_points,
-                 interactions=None):
+                 interactions=None, row_of=None):
         #: every particle, in point order -- defines the point array
         self.order = order
         #: indices into *order* of the particles actually written
@@ -141,6 +157,26 @@ class EventLayout:
         self.n_points = n_points
         #: per-interaction arrays; ``particles.interaction_id`` indexes these
         self.interactions = interactions or {}
+        #: ``{partitioner particle id: row}`` for the written particles; the
+        #: row is the id written for it
+        self.row_of = row_of or {}
+
+    def to_rows(self, ids):
+        """
+        *ids* (partitioner particle ids) as written ids: each particle's row,
+        ``-1`` for a negative id or a particle with no row.
+        """
+        ids = np.asarray(ids, dtype=np.int64)
+        out = np.full(ids.shape, -1, dtype=np.int32)
+        if not self.row_of or not ids.size:
+            return out
+        src = np.fromiter(self.row_of.keys(), dtype=np.int64, count=len(self.row_of))
+        dst = np.fromiter(self.row_of.values(), dtype=np.int64, count=len(self.row_of))
+        lut = np.full(int(max(src.max(), ids.max())) + 1, -1, dtype=np.int32)
+        lut[src] = dst
+        ok = ids >= 0
+        out[ok] = lut[ids[ok]]
+        return out
 
     def __repr__(self):
         return (f"EventLayout(order={len(self.order)}, rows={len(self.rows)}, "
@@ -251,7 +287,8 @@ def _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
 
 
 def build_layout(particles, frag_groups, inst_groups, vertices=None,
-                 keep=(), kinematics=None, inst_kinematics=None):
+                 keep=(), kinematics=None, inst_kinematics=None,
+                 frag_kinematics=None):
     """
     Decide storage order, row selection and group ranges for one event.
 
@@ -284,8 +321,13 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
     inst_kinematics : dict or None
         ``{instance rep id: {name: (4,)}}`` for the
         :data:`INSTANCE_KINEMATICS_COLUMNS`, from
-        :func:`pysupera.kinematics.instance_kinematics`.  Only instance rows
-        take them; every other row gets NaN.
+        :func:`pysupera.kinematics.instance_kinematics`.  Instance rows
+        take them.
+    frag_kinematics : dict or None
+        The same per fragment, ``{fragment rep id: {name: (4,)}}``, made by
+        the same function from the fragments.  A fragment row that heads no
+        written instance takes them; an instance row keeps its instance's.
+        Every other row gets NaN.
 
     Returns
     -------
@@ -453,13 +495,21 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
         for name in TRACK_KINEMATICS_COLUMNS:
             columns[name][hit] = np.asarray(kinematics[name],
                                             dtype=np.float64)[src[hit]]
-    if inst_kinematics:
-        for k, rid in enumerate(row_ids):
-            ik = inst_kinematics.get(rid) if rid in kept_inst_ids else None
-            if ik is None:
-                continue
-            for name in INSTANCE_KINEMATICS_COLUMNS:
-                columns[name][k] = ik[name]
+    # One set of columns for both levels: a row heading an instance holds
+    # its instance's, any other fragment row its fragment's.  An instance's
+    # head fragment is the whole instance unless the instance holds other
+    # non-LE fragments, so little is lost by not storing it twice.
+    for k, rid in enumerate(row_ids):
+        if rid in kept_inst_ids:
+            ik = (inst_kinematics or {}).get(rid)
+        elif rid in frag_ids:
+            ik = (frag_kinematics or {}).get(rid)
+        else:
+            ik = None
+        if ik is None:
+            continue
+        for name in INSTANCE_KINEMATICS_COLUMNS:
+            columns[name][k] = ik[name]
     # The instance a fragment belongs to, stated rather than left to be
     # inferred from where its points sit: hit_labels names fragments and
     # instances, and a reader should not need the point ranges to join them.
@@ -580,5 +630,19 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
         else:
             interactions["reaction"] = np.array([""] * len(live), dtype=object)
 
+    # ---- ids become rows ----------------------------------------------------
+    # Every id column so far holds partitioner ids, and every one of them
+    # names a written row (the row selection keeps whatever they point at).
+    # Rewrite them to row indices, so an id indexes the event's rows.
+    for name in ID_COLUMNS:
+        v = columns[name]
+        missing = {int(x) for x in v if x >= 0 and int(x) not in row_index}
+        if missing:
+            raise LayoutError(
+                f"{name} names particles with no row: {sorted(missing)[:10]}")
+        columns[name] = np.fromiter(
+            (row_index[int(x)] if x >= 0 else -1 for x in v),
+            dtype=np.int32, count=len(v))
+
     return EventLayout(order, rows, pc_offsets, columns, int(pc_offsets[-1]),
-                       interactions)
+                       interactions, row_of=row_index)

@@ -665,8 +665,9 @@ def test_the_reader_hands_over_its_steps_for_the_instance_kinematics():
 
 def test_instance_first_and_last_come_from_steps_the_readout_saw(tmp_path):
     """
-    first_* / last_* sit on instance rows only, each half a step from the
-    midpoint of a step the readout saw; a shower has no last point.
+    first_* / last_* sit on group rows only -- an instance row's are its
+    instance's, any other fragment row's its fragment's -- each half a step
+    from the midpoint of a step the readout saw; a shower has no last point.
     """
     from pysupera.readers import JaxtpcHDF5Reader
     from pysupera.io_v3 import read_events_v3
@@ -681,15 +682,21 @@ def test_instance_first_and_last_come_from_steps_the_readout_saw(tmp_path):
     with read_events_v3(out) as st:
         c = st[0].columns
     inst = c["inst_id"] == c["id"]
+    frag = (c["frag_id"] == c["id"]) & ~inst
     has = ~np.isnan(c["first_pos"][:, 0])
-    assert has.any() and not (has & ~inst).any()
-    shower = inst & (c["inst_sem_type"] == 1)
+    assert (has & inst).any() and (has & frag).any()
+    assert not (has & ~inst & ~frag).any()
+    # the group's type: the instance's on an instance row, else the fragment's
+    sem = np.where(inst, c["inst_sem_type"], c["frag_sem_type"])
+    shower = (inst | frag) & (sem == 1)
     assert np.isnan(c["last_pos"][shower]).all()
     assert (~np.isnan(c["last_pos"][has & ~shower, 0])).all()
-    for col in ("first_pos", "last_pos"):
-        for pos in c[col][has & (col == "first_pos" or ~shower)][:100]:
-            d = np.linalg.norm(mid - pos[:3], axis=1)
-            assert np.abs(d - half).min() < 1e-3
+    for rows in (inst, frag):
+        for col in ("first_pos", "last_pos"):
+            sel = has & rows & (np.True_ if col == "first_pos" else ~shower)
+            for pos in c[col][sel][:100]:
+                d = np.linalg.norm(mid - pos[:3], axis=1)
+                assert np.abs(d - half).min() < 1e-3
 
 
 def test_without_truth_segments_the_reader_reads_none(hit_reader):

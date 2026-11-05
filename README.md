@@ -673,7 +673,20 @@ with read_events("output.h5") as store:
 ## Output File Format
 
 `run_pysupera` writes a single HDF5 file. This section describes format
-**4.1.0**, recorded in the scalar dataset `format_version`.
+**4.2.0**, recorded in the scalar dataset `format_version`.
+
+4.2.0 changes two things:
+
+- **A particle's `id` is its row within the event**, so every id —
+  `parent_id`, `frag_id`, `inst_id`, the `hit_labels` and `groups` ids —
+  indexes the event's rows directly (see [ID conventions](#id-conventions)).
+  In 4.1 and earlier an id was the particle's index in the full particle
+  list, not a row; read those files through a `{id: row}` map, which works
+  for 4.2 files too.
+- **Fragments get `first_*` / `last_*` too.** A fragment row that heads no
+  instance now holds its fragment's, made by the same rules; an instance row
+  still holds its instance's. Before, only instance rows had them (see
+  [Kinematics](#kinematics)).
 
 4.1.0 adds, without changing anything else, where each event came from and its
 identity (see [Inputs and event identity](#inputs-and-event-identity)); 4.0.0
@@ -729,7 +742,7 @@ stores each point **once**. On a two-event file that is 6.4 MiB → 1.7 MiB.
 ### Layout
 
 ```
-format_version   scalar str   "4.1.0"
+format_version   scalar str   "4.2.0"
 n_events         scalar int64
 events/offsets   (n_events+1,) int64   particle rows per event
 events/input, input_event, jaxtpc_entry  where each event came from    } 4.1;
@@ -886,7 +899,7 @@ without them.
 
 | Column | dtype | Meaning |
 |---|---|---|
-| `id` | int32 | this particle's index **within its event** |
+| `id` | int32 | this particle's **row within its event** (4.2); every `*_id` below indexes rows the same way |
 | `geant4_trackid` | int32 | original Geant4 track ID (provenance) |
 | `geant4_parent_trackid` | int32 | track ID of the **true** direct parent; `-1` for a primary |
 | `geant4_parent_pdg` | int32 | PDG of that true parent; `-1` for a primary |
@@ -910,8 +923,8 @@ without them.
 | `inst_parent_id` | int32 | nearest ancestor instance; `== id` if none |
 | `mass` | float64 | rest mass [MeV/c²] |
 | `start_pos`, `start_mom` | float64 (M, 4) | at creation |
-| `first_pos`, `first_mom` | float64 (M, 4) | instance rows: the start of the instance's first counted step |
-| `last_pos`, `last_mom` | float64 (M, 4) | instance rows: the end of its last counted step; NaN for a shower |
+| `first_pos`, `first_mom` | float64 (M, 4) | group rows: the start of the group's first counted step — the instance's on an instance row, the fragment's on any other fragment row |
+| `last_pos`, `last_mom` | float64 (M, 4) | group rows: the end of its last counted step; NaN for a shower |
 | `end_pos`, `end_mom` | float64 (M, 4) | at destruction |
 
 A particle carries up to three classifications — its own, its fragment's and
@@ -933,10 +946,21 @@ its momentum just before converting — the start momentum less what its
 Compton electrons carried off, energy likewise. That is exact up to binding
 energy; Rayleigh scattering leaves no secondary and is not accounted for.
 
-**`first_*`, `last_*`** describe an *instance* — what a model is asked to
-reconstruct, as drawn — and are on instance rows only (NaN elsewhere). They
-are made after the instances exist, from the deposits the instance collected
-([`pysupera.kinematics`](pysupera/kinematics.py)):
+**`first_*`, `last_*`** describe a *group* — what a model is asked to
+reconstruct, as drawn. A row heading an instance holds its instance's; any
+other fragment row holds its fragment's (4.2); every other row has NaN. One
+set of columns serves both levels because an instance's head fragment is
+the whole instance unless the instance holds other non-LE fragments. Where
+it does, the head fragment's own values are not stored. On 30 pixel events
+that changes `last_*` for 41% of Michel instances and 3% of delta-ray
+instances, which have brems showers (median 26 and 24 cm), and `first_*`
+for 2% of showers whose head fragment the readout did not see; tracks and
+LE blobs never differ. Filling the fragment rows costs space: on 200 events
+the output grows 17% with pixel hits and 47% with EDepSim deposits, since
+those rows held NaN before (which compresses to nearly nothing), and 96% of
+them are LE blobs. The rows themselves are the same. They are made after the groups exist, from the
+deposits the group collected ([`pysupera.kinematics`](pysupera/kinematics.py);
+"instance" below stands for either):
 
 - Each Geant4 step goes to the particle holding its deposit: through the
   voxel map with plain EDepSim, through its segment's group with JAXTPC —
@@ -1005,24 +1029,33 @@ visible depends on is dropped, so its members belong to no written instance.
 
 ### ID conventions
 
-1. **`id` is pysupera's, not Geant4's.** It is `0 … N-1` over the event's
-   *full* particle list, assigned before the output subset is chosen. Geant4
-   track IDs are not guaranteed contiguous — an upstream stage may drop
-   particles — and are kept separately in `geant4_trackid`. **Join back to
-   the input on `geant4_trackid`, never on `id`.**
+1. **`id` is the particle's row within its event** (4.2). An event's rows
+   have ids `0 … n-1` in order, so an id indexes the event's rows directly:
 
-   **`id` is not a row index.** Only the particles worth keeping are written —
-   about 17% of them — and rows are ordered by the point layout, not by `id`.
-   So in a 2,902-row event the ids run to 21,254 and are not sorted. Build a
-   map; do not index with an id:
+   ```python
+   v["pdg"][v["parent_id"]]       # every row's parent's pdg
+   ```
+
+   The same holds for `parent_id`, `ancestor_id`, `frag_id`, `inst_id`,
+   `frag_parent_id`, `inst_parent_id`, `frag_inst_id`, and for the
+   `fragment_id` / `instance_id` of `hit_labels` and `groups/fragment_id`:
+   each is a row of the same event, or `-1`. In a raw h5py read the row is
+   `events/offsets[ev] + id`.
+
+   **`id` is pysupera's, not Geant4's.** Only the particles worth keeping are
+   written — a fraction of them — and they are numbered once chosen, so
+   the ids say nothing about the input. Geant4's track ID is kept in
+   `geant4_trackid`. **Join back to the input on `geant4_trackid`, never on
+   `id`.**
+
+   Files before 4.2 numbered the event's *full* particle list instead, so
+   their ids were not rows: a 2,902-row event had ids up to 21,254, unsorted.
+   Read them through a map, which works for 4.2 files as well:
 
    ```python
    row_of = {int(i): k for k, i in enumerate(v["id"])}
-   k = row_of[some_id]          # not v["pdg"][some_id]
+   k = row_of[some_id]
    ```
-
-   The same applies to `parent_id`, `frag_id`, `inst_id`, `frag_parent_id`
-   and `inst_parent_id`: all of them are ids, and all need the map.
 
 2. **`geant4_trackid` is one-to-many.** Defragmentation splits a particle whose
    point cloud falls into disconnected pieces into several pysupera particles,
@@ -1483,9 +1516,9 @@ The join is the same either way — a hit names its group, and `groups/` names
 the group's owner — so only the plane name changes between readouts. See
 [Wire and pixel readout](#wire-and-pixel-readout).
 
-Both arrays are indexed by event-global group number, `-1` where nothing
-claims the group; `vol_offsets` shifts a plane's local group number into that
-space. `pysupera.provenance` has `hits_of_groups` and `groups_of_particles`
+Both arrays are indexed by event-global group number. `frag_owner` is the
+owning fragment's id — its row in the event — and `-1` where nothing claims
+the group. `vol_offsets` shifts a plane's local group number into that space. `pysupera.provenance` has `hits_of_groups` and `groups_of_particles`
 for the same joins.
 
 For instances, derive rather than read — `instance_of_groups(view,
@@ -1653,7 +1686,8 @@ Writes `<output>_voxmap.h5`: for every output voxel, which input deposits were
 merged into it and with what energy. Two nested CSR levels:
 
 ```
-particles/id, particles/vox_offsets   ->  a particle's voxels
+particles/id, particles/vox_offsets   ->  a particle's voxels; id is its row
+                                          in the output (4.2), -1 if it has none
 voxels/input_offsets                  ->  a voxel's input points
 flat/input_ids, flat/input_energies   ->  original point index + its energy
 ```

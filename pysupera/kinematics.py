@@ -7,8 +7,11 @@ The ``first_*`` / ``last_*`` kinematics of reconstructed instances.
 ``start_*`` and ``end_*`` describe a Geant4 particle and are read off its
 record (:func:`~pysupera.readers.format_edepsim_h5.particle_kinematics`).
 ``first_*`` and ``last_*`` describe what a model is asked to reconstruct --
-an instance, as drawn -- so they are made from the energy deposits the
-instance actually collected, after the instances exist:
+an instance, or a fragment, as drawn -- so they are made from the energy
+deposits the group actually collected, after the groups exist.  They are
+written for instances, and for the fragments that head no instance (4.2);
+an instance's head fragment is the whole instance unless the instance holds
+other non-LE fragments.  Below, "instance" stands for either:
 
 * Each Geant4 step goes to the pysupera particle that holds its deposit
   (:func:`step_particles`), so a step follows its deposit through
@@ -31,7 +34,8 @@ instance actually collected, after the instances exist:
   with that particle's mass, so its E can be below the row's own mass:
   an LE electron instance whose earliest step is a photon's local deposit.
 
-Only instance rows carry these values; every other row gets NaN.
+Instance rows carry their instance's values, other fragment rows their
+fragment's; every other row gets NaN.
 """
 
 from __future__ import annotations
@@ -110,7 +114,8 @@ def step_particles(n_steps, particles, group=None, group_owner=None):
 def instance_kinematics(inst_groups, particles, steps, step_owner, step_pid,
                         track_kin, counted=None):
     """
-    ``first_*`` / ``last_*`` of every instance in *inst_groups*.
+    ``first_*`` / ``last_*`` of every instance in *inst_groups* -- or of
+    every fragment, given fragment groups: the rules are the same.
 
     Parameters
     ----------
