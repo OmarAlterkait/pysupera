@@ -1294,9 +1294,12 @@ hit on the sensor image — are not stored; most of that is charge that arrived
 after the readout window closed.
 
 **`hit_labels/` — one label per hit, aligned with the JAXTPC hits file.**
-For every plane of every volume, entry *k* labels CSR entry *k* of that plane
-in the hits file (`volume_V/<source>`), so a loader reads hits and labels
-with the same index:
+A *hit* is one entry of a plane's CSR in the hits file: one sample, a pixel
+(or wire) and a tick with its charge — for pixel, an entry of
+`Pixel/charges_i16`. For every plane of every volume, entry *k* labels CSR
+entry *k* of that plane in the hits file (`entry_N/volume_V/<source>`, with
+`N` = `events/jaxtpc_entry[ev]`), so a loader reads hits and labels with the
+same index:
 
 ```
 hit_labels/volume{V}/plane{P}/        attrs: source ("U", "V", "Y" or "Pixel")
@@ -1562,29 +1565,81 @@ Which readout hits belong to which reconstructed object. For a label per hit,
 read `hit_labels/` (see [What the output stores](#what-the-output-stores-jaxtpc-input)):
 it is aligned with the hits file and needs no join. `groups/` is the
 group-level view behind it, kept because it is small and answers questions
-about groups directly. A hit is the projection of a JAXTPC *group*, and
-`groups/` records the fragment that owns each group, plus one bit saying
-whether that group is low-energy — whether its fragment is a `kLEScatter`
-fragment:
+about groups directly.
+
+**A `groups/` row is one JAXTPC *group*:** a small cluster of true deposits
+in one volume (about four), the unit JAXTPC projects onto the readout and
+`group_to_track` assigns a Geant4 track. It is neither a point nor a hit:
+points are 3 mm voxels of the deposits (a group's deposits land in 2–4
+voxels 38% of the time, a voxel can hold several groups), and each group
+leaves many hits, or none. So the three counts are unrelated — 1.04M
+groups, 0.59M points and 98.6M hits in 20 events of
+`supera_pixel_j004540-004544`. `groups/` records, per group, the fragment
+that owns it and one bit saying whether it is low-energy (its fragment is a
+`kLEScatter` fragment).
+
+| array | one row is | indexed by |
+|---|---|---|
+| `points/flat` | a voxel (or deposit) of one particle | the particle ranges `pc_*`, `frag_pc_*`, `inst_pc_*` |
+| `groups/fragment_id`, `is_le` | a JAXTPC group | event-global group number: volume `V`'s local group `g` (an index of `volume_V/group_to_track`, a value of `deposit_to_group`) is `volume_offsets[V] + g` |
+| `hit_labels/volume{V}/plane{P}/*` | a hit | the hit's CSR entry on that plane in the hits file |
+
+The hits file stores a plane's hits group by group: `group_ids` and
+`group_sizes` have one entry per *group record*, and record *r* owns the
+next `group_sizes[r]` hits. So a hit's group is a `np.repeat`, not
+`group_ids` indexed by hit:
 
 ```python
+import h5py, hdf5plugin, numpy as np
+from pysupera.io_v3 import read_events_v3
+
 with read_events_v3("out.h5") as store:
     frag_owner, is_le, vol_offsets = store.group_owners(ev)
+    src   = store.event_sources()              # where event ev came from
+    hits_path = src["inputs"]["jaxtpc_hits"][src["input"][ev]]
+    entry = int(src["jaxtpc_entry"][ev])
+
+with h5py.File(hits_path) as hits_file:
+    plane = hits_file[f"entry_{entry:06d}/volume_0/Pixel"]   # or U / V / Y for wire
+    gid   = np.repeat(plane["group_ids"][:], plane["group_sizes"][:]) + vol_offsets[0]
+    # gid[k] is hit k's group: gid lines up with hit_labels/volume0/plane0
 
 groups = np.flatnonzero(frag_owner == my_fragment_id)
-plane  = "Pixel"      # or "U" / "V" / "Y" for wire readout
-gid    = inst_file[f"event_{ev:03d}/volume_0/{plane}/group_ids"][:] + vol_offsets[0]
-hits   = np.flatnonzero(np.isin(gid, groups))
+hits   = np.flatnonzero(np.isin(gid, groups))          # hit (CSR entry) indices
+# pixel: this includes the groups' hits off the sensor image, which hit_labels
+# labels -1; to match it, keep hits[on[hits]] with
+# on = store.hit_labels(ev)[(0, 0)]["on_sensor"]
 ```
 
 The join is the same either way — a hit names its group, and `groups/` names
 the group's owner — so only the plane name changes between readouts. See
 [Wire and pixel readout](#wire-and-pixel-readout).
 
-Both arrays are indexed by event-global group number. `frag_owner` is the
-owning fragment's id — its row in the event — and `-1` where nothing claims
-the group. `vol_offsets` shifts a plane's local group number into that space. `pysupera.provenance` has `hits_of_groups` and `groups_of_particles`
-for the same joins.
+`frag_owner` is the owning fragment's id — its row in the event (in files
+before 4.2, its id: read through a `{id: row}` map) — and **`-1` where no
+fragment claims the group: a group that left no hit on the sensor image**.
+That is common, 23% of groups in that file: 237,768 of 1,035,523 groups in
+20 events left no hit at all (most of that charge arrived after the readout
+window closed), and 9,196 left hits only off the sensor image; every group
+with a hit on the sensor has an owner. Their deposits are not in
+`points/flat` either.
+
+`groups/` and `hit_labels/` agree hit by hit on the sensor — a hit's label is
+its group's owner for 85,382,533 of 85,382,797 hits (for one fragment of
+event 3, the example above with the sensor mask gives exactly its 131,957
+labelled hits, and 11,864 more off the sensor without it); the other 264 are hits
+of the few groups that straddle a fragment split (see below), which
+`groups/` gives to the majority and `hit_labels/` labels one by one. For a
+label per hit, use `hit_labels/`.
+
+**No array maps points to groups or hits.** They join through the fragment:
+a fragment's points are rows `frag_pc_start : frag_pc_end`, its groups those
+with `frag_owner` equal to it, its hits those labelled with it. For the
+deposit level, the opt-in voxel map (`store_mapping`) gives each deposit's
+voxel, and the hits file's `deposit_to_group` its group.
+
+`pysupera.provenance` has `hits_of_groups` (given the per-hit `gid` above)
+and `groups_of_particles` for the same joins.
 
 For instances, derive rather than read — `instance_of_groups(view,
 frag_owner)` returns the owning instance per group, and the interaction

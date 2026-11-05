@@ -708,17 +708,21 @@ class EventStoreV3:
 
     def group_owners(self, ev):
         """
-        ``(instance_id, fragment_id, volume_offsets)`` for event *ev*, or
+        ``(fragment_id, is_le, volume_offsets)`` for event *ev*, or
         ``(None, None, None)`` when the file carries no group table
         (non-JAXTPC runs).
 
-        Indexed by event-global group number; ``fragment_id`` is the owning
-        fragment's id (its row in the event), -1 where no stored fragment
-        claims the group.  The owning *instance* is not
-        stored -- derive it with
-        :func:`pysupera.provenance.instance_of_groups`.  *volume_offsets* says where
-        each volume's groups begin, so a plane's local group number can be
-        shifted into this space.  See :mod:`pysupera.provenance`.
+        *fragment_id* and *is_le* are indexed by event-global group number.
+        ``fragment_id`` is the owning fragment's id (its row in the event),
+        -1 where no fragment claims the group: one that left no hit on the
+        sensor image.  ``is_le`` is 1 where that fragment is kLEScatter.
+        The owning *instance* is not stored -- derive it with
+        :func:`pysupera.provenance.instance_of_groups`.  *volume_offsets*
+        says where each volume's groups begin: volume ``V``'s local group
+        ``g`` is ``volume_offsets[V] + g``.  A hit's local group is
+        ``np.repeat(group_ids, group_sizes)`` on its plane in the hits file,
+        since those arrays are per group record, not per hit.  See
+        :mod:`pysupera.provenance`.
         """
         if "groups/fragment_id" not in self._f:
             return None, None, None

@@ -15,7 +15,11 @@ a function, and one small table per event answers "which hits belong to
 instance X" without going near voxels:
 
     groups = {g for g, pid in group_particle if pid in particles_of(X)}
-    hits   = [h for h in plane if group_ids[h] in groups]
+    hits   = [h for h in plane if group_of_hit[h] in groups]
+
+where ``group_of_hit`` is ``np.repeat(group_ids, group_sizes)``: the hits
+file stores a plane's hits group by group, ``group_ids`` and
+``group_sizes`` one entry per group record.
 
 The invariant is checked rather than assumed -- see :func:`build_group_owners`.
 Going through voxels instead would be both larger and worse: a group's deposits
@@ -249,8 +253,10 @@ def hits_of_groups(group_ids, wanted):
     """
     Row indices of the hits belonging to *wanted*, on one readout plane.
 
-    *group_ids* is a plane's per-hit group number; *wanted* any collection of
-    group numbers.
+    *group_ids* is a plane's per-hit group number -- the hits file's
+    ``np.repeat(group_ids, group_sizes)``, as its own ``group_ids`` is per
+    group record -- in the same number space as *wanted*, any collection
+    of group numbers.
     """
     wanted = np.asarray(list(wanted), dtype=np.int64)
     if not len(wanted):
