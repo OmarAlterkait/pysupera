@@ -405,8 +405,8 @@ def SetSemanticType(interaction_type, pdg, parent_pdg, point_cloud,
     * ``kPrimary`` : electrons / photons → ``kShower``; others → ``kTrack``
     * ``kDelta`` : small cloud (< *point_cloud_size*) → ``kLEScatter``;
       large → ``kDelta``
-    * ``kDecay`` : e⁻ from μ → ``kMichel``; e / γ → ``kShower``;
-      others → ``kTrack``
+    * ``kDecay`` : small cloud → ``kLEScatter``; e⁻ from μ → ``kMichel``;
+      e / γ → ``kShower``; others → ``kTrack``
     * ``kNeutron`` / ``kIonization`` / ``kPhotoElectron`` → ``kLEScatter``
     * ``kPhoton`` / ``kConversion`` / ``kCompton`` / ``kOtherShower`` :
       e / γ and large cloud → ``kShower``; small cloud → ``kLEScatter``
@@ -487,7 +487,9 @@ def SetSemanticType(interaction_type, pdg, parent_pdg, point_cloud,
             return SemanticType.kDelta
         
     elif interaction_type == InteractionType.kDecay:
-        if abs(pdg) == 11 and abs(parent_pdg) == 13:
+        if extent < point_cloud_size:
+            return SemanticType.kLEScatter
+        elif abs(pdg) == 11 and abs(parent_pdg) == 13:
             return SemanticType.kMichel
         elif abs(pdg) in [11,22]:
             return SemanticType.kShower

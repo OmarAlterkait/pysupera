@@ -55,5 +55,6 @@ ass_key: ass/particle_pstep_lar_vol
 
 # Kinetic-energy threshold (MeV) used by the interaction-type classifier to
 # distinguish low-energy electrons (→ kCompton) from higher-energy ones
-# (→ kOtherShower) when no cleaner G4 process tag is available.
+# (→ kOtherShower) when no cleaner G4 process tag is available.  Both give
+# the same semantic type, so this only changes the stored interaction_type.
 electron_energy_threshold: 0.05

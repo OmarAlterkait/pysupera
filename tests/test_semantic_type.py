@@ -82,6 +82,17 @@ class TestDecay:
         result = SetSemanticType(PT_DECAY, 211, 13, LARGE_PC)
         assert result == SemanticType.kTrack
 
+    @pytest.mark.parametrize("pdg, parent_pdg", [(11, 13), (11, 211), (22, 13), (211, 13)])
+    def test_a_small_decay_product_is_klescatter(self, pdg, parent_pdg):
+        # e.g. the sub-MeV cascade electrons of mu- capture, which come out
+        # of the same Geant4 process as the mu- Michel
+        result = SetSemanticType(PT_DECAY, pdg, parent_pdg, SMALL_PC, point_cloud_size=MIN_SIZE)
+        assert result == SemanticType.kLEScatter
+
+    def test_a_large_michel_passes_the_size_check(self):
+        result = SetSemanticType(PT_DECAY, 11, 13, LARGE_PC, point_cloud_size=MIN_SIZE)
+        assert result == SemanticType.kMichel
+
 
 class TestLEScatterProcesses:
     def test_neutron_is_klescatter(self):

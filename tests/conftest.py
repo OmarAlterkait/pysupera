@@ -12,7 +12,7 @@ interaction_type mapping (InteractionType enum → SemanticType):
   kConversion     → sem kShower (pdg=11/22, large) / kLEScatter (small)
   kIonization     → sem kLEScatter
   kPhotoElectron  → sem kLEScatter
-  kDecay          → sem kMichel / kShower / kTrack
+  kDecay          → sem kMichel / kShower / kTrack (large) / kLEScatter (small)
   kOtherShower    → sem kShower (pdg=11/22, large) / kLEScatter (small)
   kInvalidProcess → sem kUnknown
 """

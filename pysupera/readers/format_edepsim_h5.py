@@ -666,19 +666,26 @@ def _get_interaction_type(parts: np.ndarray,
     Derive the pysupera :class:`~pysupera.utils.InteractionType` integer
     for each particle using Geant4 process information.
 
-    The logic mirrors the ``get_interaction_type`` function in the example
-    notebook.  ``np.select`` is used instead of a Python loop for
-    performance.
+    The logic follows the ``get_interaction_type`` function in the example
+    notebook, except for electrons made by a hadronic process at rest
+    (subtype 151): those are all ``kDecay`` here.  The notebook took them
+    for a decay only when they started where their parent *started* (within
+    1e-4 mm), which a daughter of a stopped muon never does -- it starts
+    where the muon *ended* -- so every mu- Michel came out ``kOtherShower``.
+    It also split them at *electron_energy_threshold*, because ``kDecay``
+    had no size check; it has one now (:func:`~pysupera.utils.SetSemanticType`).
+    ``np.select`` is used instead of a Python loop for performance.
 
     Parameters
     ----------
     parts : structured ndarray
         Must contain fields: ``track_id``, ``parent_track_id``, ``pdg``,
-        ``proc_start``, ``subproc_start``, ``ke``, ``x``, ``y``, ``z``.
+        ``proc_start``, ``subproc_start``, ``ke``.
     electron_energy_threshold : float, optional
         Kinetic-energy threshold (MeV) separating kCompton-like low-energy
         electrons from kOtherShower-like higher-energy electrons when no
-        cleaner process classification is available.
+        cleaner process classification is available.  The two lead to the
+        same semantic type, so this only decides the stored interaction type.
     is_primary : ndarray of bool or None, optional
         Which particles are generator primaries (:func:`primary_mask`).
         A primary is ``kPrimary`` -- never LE, whatever its size --
@@ -706,16 +713,6 @@ def _get_interaction_type(parts: np.ndarray,
         is_primary = primary_mask(parts)[0]
     is_primary = np.asarray(is_primary, dtype=bool)
 
-    parent_locs  = _search_parents(track_id, parent_tid)
-    parent_valid = parent_locs != -1
-    parent_zfill = np.where(parent_valid, parent_locs, 0)
-
-    xs, ys, zs = parts["x"], parts["y"], parts["z"]
-    dx = xs[parent_zfill] - xs
-    dy = ys[parent_zfill] - ys
-    dz = zs[parent_zfill] - zs
-    dr = np.where(parent_valid, np.sqrt(dx**2 + dy**2 + dz**2), -1.0)
-
     # Shorthands
     EM     = G4ProcessType.kProcessElectromagnetic
     DK     = G4ProcessType.kProcessDecay
@@ -725,7 +722,12 @@ def _get_interaction_type(parts: np.ndarray,
     GC     = G4ProcessSubtype.kSubtypeEMGammaConversion
     PP     = G4ProcessSubtype.kSubtypeEMPairProdByCharged
     ION    = G4ProcessSubtype.kSubtypeEMIonization
-    _HAD151 = 151   # hadronic sub-process 151 (nuclear de-excitation / gammas)
+    # Hadronic at rest (fHadronAtRest): muMinusCaptureAtRest,
+    # hBertiniCaptureAtRest.  A mu- that stops in argon is captured into a
+    # muonic atom, and its decay in orbit -- the mu- Michel -- comes out of
+    # this process, not Decay.  So do the atomic-cascade electrons of the
+    # capture (well under 1 MeV), which the size check of kDecay makes LE.
+    _HAD151 = 151
 
     is_electron = abs(pdg) == 11
 
@@ -744,8 +746,7 @@ def _get_interaction_type(parts: np.ndarray,
         is_electron & (proc_start == EM) & (subproc_start == ION),
         is_electron & (proc_start == EM),
         is_electron & (proc_start == DK),
-        is_electron & (proc_start == HAD) & (subproc_start == _HAD151) & (dr < 1e-4) & (ke < electron_energy_threshold),
-        is_electron & (proc_start == HAD) & (subproc_start == _HAD151) & (dr < 1e-4),
+        is_electron & (proc_start == HAD) & (subproc_start == _HAD151),
         is_electron & (ke < electron_energy_threshold),
         is_electron,
         ~is_electron,
@@ -764,7 +765,6 @@ def _get_interaction_type(parts: np.ndarray,
         InteractionType.kIonization,
         InteractionType.kInvalidProcess,
         InteractionType.kDecay,
-        InteractionType.kIonization,
         InteractionType.kDecay,
         InteractionType.kCompton,
         InteractionType.kOtherShower,

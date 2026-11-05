@@ -414,6 +414,19 @@ recorded in the output's `issues/` group, and the run goes on using the
 table. Without a table, the parent-less particles are taken as the
 primaries.
 
+A Michel electron is an e± from a muon made by a decay, and Geant4 makes
+them two ways. A μ⁺ decays (`Decay`, process type 6). A μ⁻ that stops in
+argon is captured into a muonic atom, and when it decays in orbit the
+electron comes out of `muMinusCaptureAtRest` (hadronic, subtype 151),
+typically 0.5 µs after the muon stopped. The EDepSim reader takes every
+electron of subtype 151 as a decay. That includes the atomic-cascade
+electrons of μ⁻ and π⁻ capture, which are well under 1 MeV. Like every
+other type decided by size, a decay electron with a cloud below
+`point_cloud_size` is `kLEScatter`, which is where those cascade electrons
+go. Before November 2026, the subtype-151 rule required an electron to start
+where its parent *started*. A muon's daughter starts where the muon *ended*,
+so every μ⁻ Michel was labelled `kShower`.
+
 | Value | Meaning |
 |---|---|
 | `kShower` | EM shower fragment |

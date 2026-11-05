@@ -116,6 +116,32 @@ class TestPrimaryIsNeverLE:
         assert [IT(int(v)) for v in it[1:]] == [IT.kNeutron, IT.kNucleus]
 
 
+class TestCaptureAtRestElectrons:
+    """A stopped mu- decays in orbit through muMinusCaptureAtRest (4/151)."""
+
+    def event(self, ke):
+        # a primary mu- that stops 1 m from where it started, and an electron
+        # that capture at rest makes where it stopped
+        ev = parts([(1, -1, 13, 0, 0), (2, 1, 11, 4, 151)])
+        ev[0]["end_x"] = 1000.0
+        ev[1]["x"], ev[1]["ke"] = 1000.0, ke
+        return ev
+
+    @pytest.mark.parametrize("ke", [40.0, 0.5, 0.01])
+    def test_every_one_is_a_decay_whatever_its_energy(self, ke):
+        it = _get_interaction_type(self.event(ke))
+        assert IT(int(it[1])) is IT.kDecay
+
+    def test_size_then_decides_michel_or_le(self):
+        big, small = (np.zeros((n, 6), dtype=np.float32) for n in (200, 1))
+        assert SetSemanticType(IT.kDecay, 11, 13, big, 85) is ST.kMichel
+        assert SetSemanticType(IT.kDecay, 11, 13, small, 85) is ST.kLEScatter
+
+    def test_a_pi_minus_capture_electron_is_a_decay_too(self):
+        ev = parts([(1, -1, -211, 0, 0), (2, 1, 11, 4, 151)])
+        assert IT(int(_get_interaction_type(ev)[1])) is IT.kDecay
+
+
 def write_edepsim(path, prim_ids=None, steps=True):
     """
     A one-event EDepSim file: EVENT, one step each for tracks 1 and 3 (none
