@@ -34,6 +34,7 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Which particles are stored](#which-particles-are-stored)
    - [Particle columns](#particle-columns)
    - [Interaction columns](#interaction-columns)
+   - [Identifying primaries](#identifying-primaries)
    - [ID conventions](#id-conventions)
    - [Wire and pixel readout](#wire-and-pixel-readout)
    - [Wire deposits and pixel hits](#wire-deposits-and-pixel-hits)
@@ -1027,6 +1028,41 @@ instances = v["inst_id"] == v["id"]
 under `instance_output=traceable` (the default) an instance that nothing
 visible depends on is dropped, so its members belong to no written instance.
 
+### Identifying primaries
+
+A **primary** is a Geant4 primary: a particle the generator handed to
+Geant4 (`primary/geant4` in the input), for a neutrino event the particles
+leaving the vertex. The test is
+
+```python
+primaries = v["parent_id"] == v["id"]
+```
+
+and it holds whatever was filtered: a row is self-parented if and only if it
+is a Geant4 primary. Most particles get no row, and `parent_id` skips to the
+nearest one that does, but the file always holds each row's Geant4 primary,
+so a removed parent never makes a secondary look primary. Two other columns
+give the same rows and need not be checked separately: `geant4_parent_trackid
+== -1`, and, on instance rows, `inst_parent_id == id` (every stored primary
+heads an instance). A primary none of whose descendants left a visible point
+has no row: 10,253 of the 11,218 primaries in 200 events of
+`edepsim_j004541` are written.
+
+**Neutral pions are primaries; their photons are not.** A π0 decays before
+it deposits anything, yet it is stored: a row, heading an instance with no
+points, whose decay photons point to it through both `parent_id` and
+`inst_parent_id`. In those 200 events, 1,067 π0 rows (859 primaries, the rest
+made in secondary hadron interactions) are parents of 1,798 photon
+instances. This differs from PILArNet, which stored no π0 and flagged its
+decay photons as primaries. To get those photons here, ask for a photon
+whose parent is a primary π0:
+
+```python
+par = v["parent_id"]
+pi0_photons = ((v["pdg"] == 22) & (v["pdg"][par] == 111)
+               & (v["parent_id"][par] == par))
+```
+
 ### ID conventions
 
 1. **`id` is the particle's row within its event** (4.2). An event's rows
@@ -1062,10 +1098,10 @@ visible depends on is dropped, so its members belong to no written instance.
    and they all inherit the track they came from. `id` distinguishes them.
 
 3. **Walking `parent_id` always terminates inside the file.** Because most
-   particles have no row, `parent_id` points at the nearest *stored* ancestor,
-   and a particle with no stored ancestor is marked a primary. `ancestor_id` is
-   derived from that same redirected chain, so the walk and the stated ancestor
-   agree.
+   particles have no row, `parent_id` points at the nearest *stored* ancestor.
+   Every row's Geant4 primary is stored, so the walk ends on it, and
+   `ancestor_id`, derived from that same redirected chain, names it (see
+   [Identifying primaries](#identifying-primaries)).
 
 **One asymmetry:** ids are per-event, but point ranges are stored *absolute*
 into `points/flat`, so a whole-file reader slices with no arithmetic.

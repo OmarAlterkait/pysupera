@@ -779,6 +779,38 @@ class TestKinematics:
         assert np.isnan(v["start_pos"]).all() and np.isnan(v["mass"]).all()
 
 
+class TestOnlyGeant4PrimariesAreSelfParented:
+    """A row heading no instance still gets its Geant4 primary's row."""
+
+    def lone_le_event(self):
+        """A point-less primary neutron(0) whose only descendant with points,
+        electron(2) via photon(1), is a fragment heading no instance."""
+        n0 = make_particle(0, PT_PRIMARY, pdg=2112, parent_id=0, ancestor_id=0,
+                           pc=np.zeros((0, 6), dtype=np.float32), interaction_id=0)
+        g1 = make_particle(1, PT_TRACK, pdg=22, parent_id=0, ancestor_id=0,
+                           pc=np.zeros((0, 6), dtype=np.float32), interaction_id=0)
+        e2 = make_particle(2, PT_TRACK, pdg=11, parent_id=1, ancestor_id=0,
+                           n_pts=3, interaction_id=0)
+        e2.member_ids = [2]
+        return [n0, g1, e2], snapshot_groups([e2]), []
+
+    def test_the_primary_gets_a_row_and_nothing_between(self):
+        lay = build_layout(*self.lone_le_event())
+        c, r = lay.columns, lay.row_of
+        assert set(r) == {0, 2}
+        assert c["parent_id"][r[2]] == r[0]
+        assert c["parent_id"][r[0]] == r[0]
+
+    def test_self_parented_rows_are_the_geant4_primaries(self):
+        for ev in (self.lone_le_event(), chain_event(), sparse_chain_event()):
+            c = build_layout(*ev).columns
+            selfp = c["parent_id"] == c["id"]
+            assert (selfp == (c["geant4_parent_trackid"] == -1)).all()
+
+    def test_rows_already_stored_are_not_added(self):
+        assert len(build_layout(*chain_event()).rows) == 3
+
+
 def sparse_chain_event(shift=(10, 13, 17, 20)):
     """
     chain_event with partitioner ids that are not rows -- gaps and an offset,

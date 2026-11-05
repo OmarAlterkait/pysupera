@@ -59,9 +59,10 @@ a particle with no row.
 
 *Walkable genealogy.*  Only a fraction of Geant4 particles are stored, so a
 stored particle's true parent may be absent.  ``parent_id`` is therefore
-redirected to the nearest *stored* ancestor, and a particle with no stored
-ancestor is marked a primary (``parent_id == id``).  Walking ``parent_id``
-always terminates on a stored row rather than dangling.
+redirected to the nearest *stored* ancestor.  Every row's Geant4 primary
+is stored -- an instance's whole ancestry, any other row's primary alone --
+so ``parent_id == id`` marks exactly the Geant4 primaries, and walking
+``parent_id`` always terminates on one rather than dangling.
 """
 
 from __future__ import annotations
@@ -181,6 +182,23 @@ class EventLayout:
     def __repr__(self):
         return (f"EventLayout(order={len(self.order)}, rows={len(self.rows)}, "
                 f"points={self.n_points})")
+
+
+def _chain_top(pid, by_id, memo):
+    """The particle a ``parent_id`` walk from *pid* ends on (its Geant4
+    primary).  *memo* caches the answer for every particle walked through."""
+    path, cur = [], pid
+    while cur not in memo:
+        path.append(cur)
+        nxt = int(by_id[cur].parent_id)
+        if nxt == cur or nxt not in by_id or nxt in path:
+            memo[cur] = cur
+            break
+        cur = nxt
+    top = memo[cur]
+    for p in path:
+        memo[p] = top
+    return top
 
 
 def _group_of(groups):
@@ -399,6 +417,12 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
 
     keep = (visible | kept_inst_ids | ancestry
             | {int(i) for i in keep}) & set(by_id)
+    # Every other row -- an LE blob, a fragment heading no instance -- gets
+    # its Geant4 primary's row (only that one, not the chain between), so
+    # parent_id == id marks exactly the Geant4 primaries: a row whose
+    # primary has no row would otherwise be self-parented.
+    top = {}
+    keep |= {_chain_top(i, by_id, top) for i in keep - ancestry}
     # Rows go by each particle's *own* interaction, so an interaction's rows
     # stay contiguous (part_start/part_end) even when some of its particles'
     # points were absorbed into another interaction's group.  Within an
