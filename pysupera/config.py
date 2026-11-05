@@ -46,6 +46,7 @@ _PIPELINE_KEYS: frozenset[str] = frozenset({
     "reader.step_key",
     "reader.ass_key",
     "reader.electron_energy_threshold",
+    "reader.michel_max_muon_momentum",
     # Particle construction
     "particle.min_pc_size",
     # Merge-duplicates preprocessor
@@ -642,6 +643,8 @@ def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path):
                                                 "primary/geant4")),
                 electron_energy_threshold = float(cfg.reader.get(
                                                 "electron_energy_threshold", 0.05)),
+                michel_max_muon_momentum  = float(cfg.reader.get(
+                                                "michel_max_muon_momentum", 77.0)),
                 min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
                 voxel_size                = _classify_voxel_size(cfg),
                 # None follows the readout: hits for pixel, deposits for wire.
@@ -689,6 +692,8 @@ def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path):
                                              "ass/particle_pstep_lar_vol")),
             electron_energy_threshold = float(cfg.reader.get(
                                              "electron_energy_threshold", 0.05)),
+            michel_max_muon_momentum  = float(cfg.reader.get(
+                                             "michel_max_muon_momentum", 77.0)),
             min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
             voxel_size                = _classify_voxel_size(cfg),
         )

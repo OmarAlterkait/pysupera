@@ -427,6 +427,36 @@ go. Before November 2026, the subtype-151 rule required an electron to start
 where its parent *started*. A muon's daughter starts where the muon *ended*,
 so every μ⁻ Michel was labelled `kShower`.
 
+**Michels from a decay in flight.** What makes a decay electron a Michel
+here is what one can see: a muon track that reaches its Bragg peak and an
+electron from its end. A muon's decay electron is `kDecay` (so `kMichel`)
+only if the muon ended below `reader.michel_max_muon_momentum`, 77 MeV/c by
+default, whether Geant4 decayed it at rest or in flight. At 77 MeV/c a muon
+in argon loses twice the MIP rate (4.2 MeV/cm against 2.1), and has 25 MeV
+of kinetic energy and about 35 mm of track left. A faster muon decays on a
+track still at MIP rate, with no Bragg peak, and its electron is an
+ordinary one (`kOtherShower`): `kShower`, or `kLEScatter` if small. In
+1000 events of the doraemon_2026_1M_lartpc campaign there are 8,469 muon
+decay electrons. 12 are from a decay in flight, 2 of them below 77 MeV/c
+(muon end momenta 23 and 61 MeV/c) and 10 above (84 to 1159 MeV/c, with
+electrons of 19 to 635 MeV). Before November 2026 every muon decay
+electron was `kDecay`, and a 250 MeV electron from a muon that still had
+77 cm to go was a `kMichel` shower.
+
+So a Michel can carry more energy than a decay at rest gives it. A muon
+decaying at 77 MeV/c brings 25 MeV of kinetic energy into the decay, and
+the boost lets its electron reach about 103 MeV of kinetic energy, about
+50 MeV above the 52.8 MeV endpoint of a free muon at rest. An analysis that
+expects the at-rest spectrum should take such a Michel as a decay in
+flight. The output shows which it was. A `kMichel` instance row's
+`parent_id` is its muon's row (true of every one of the 3,044 Michel
+instances in the four 200-event runs checked), and that row's `end_mom` is
+the muon's momentum where it decayed: zero for a decay at rest, nonzero for
+one in flight. The Michel's own energy is its `start_mom`. Use the muon's
+`end_mom`, not the Michel's energy, to tell them apart: a μ⁻ that decays at
+rest in orbit of an argon nucleus can give its electron more than 52.8 MeV
+(up to 57.5 MeV in these events).
+
 | Value | Meaning |
 |---|---|
 | `kShower` | EM shower fragment |

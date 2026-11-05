@@ -26,7 +26,8 @@ READERS = ("edepsim_h5", "jaxtpc_wire", "jaxtpc_pixel")
 
 #: Keys the base defines and every variant must therefore inherit.
 SHARED_KEYS = ("format", "particle_key", "vertex_key", "primary_key",
-               "step_key", "ass_key", "electron_energy_threshold")
+               "step_key", "ass_key", "electron_energy_threshold",
+               "michel_max_muon_momentum")
 
 
 def _cfg(name, *extra):

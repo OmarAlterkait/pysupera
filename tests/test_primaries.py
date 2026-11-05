@@ -142,6 +142,59 @@ class TestCaptureAtRestElectrons:
         assert IT(int(_get_interaction_type(ev)[1])) is IT.kDecay
 
 
+class TestDecayInFlight:
+    """
+    A muon's decay electron is a Michel only if the muon ended below
+    michel_max_muon_momentum (77 MeV/c, 2x MIP): its Bragg peak is visible.
+    """
+
+    def event(self, end_p, sign=1, proc=(6, 201)):
+        # a primary muon that decays where it ends, with |p| = end_p there
+        ev = parts([(1, -1, 13 * sign, 0, 0), (2, 1, -11 * sign, *proc)])
+        ev[0]["end_pz"] = end_p
+        return ev
+
+    def itype(self, ev, **kw):
+        return IT(int(_get_interaction_type(ev, **kw)[1]))
+
+    @pytest.mark.parametrize("end_p", [0.0, 23.0, 61.0, 76.9])
+    @pytest.mark.parametrize("sign", [1, -1])
+    def test_a_muon_near_its_bragg_peak_gives_a_michel(self, end_p, sign):
+        assert self.itype(self.event(end_p, sign)) is IT.kDecay
+
+    @pytest.mark.parametrize("end_p", [77.0, 84.0, 290.0, 1159.0])
+    @pytest.mark.parametrize("sign", [1, -1])
+    def test_a_decay_in_flight_gives_an_ordinary_electron(self, end_p, sign):
+        assert self.itype(self.event(end_p, sign)) is IT.kOtherShower
+
+    def test_so_its_shower_is_not_a_michel(self):
+        big = np.zeros((200, 6), dtype=np.float32)
+        it = self.itype(self.event(290.0))
+        assert SetSemanticType(it, -11, 13, big, 85) is ST.kShower
+
+    def test_the_capture_at_rest_rule_applies_it_too(self):
+        assert self.itype(self.event(0.0, proc=(4, 151))) is IT.kDecay
+        assert self.itype(self.event(290.0, proc=(4, 151))) is IT.kOtherShower
+
+    def test_the_threshold_is_configurable(self):
+        ev = self.event(84.0)
+        assert self.itype(ev, michel_max_muon_momentum=104.0) is IT.kDecay
+        assert self.itype(ev, michel_max_muon_momentum=55.0) is IT.kOtherShower
+
+    def test_only_muon_daughters_are_affected(self):
+        # a pi+ decaying in flight: its daughter keeps kDecay (kTrack for a mu)
+        ev = parts([(1, -1, 211, 0, 0), (2, 1, -11, 6, 201)])
+        ev[0]["end_pz"] = 500.0
+        assert self.itype(ev) is IT.kDecay
+
+    def test_the_reader_passes_the_setting(self, tmp_path):
+        from pysupera.readers import EDepSimHDF5Reader
+        write_edepsim(tmp_path / "e.h5")
+        with EDepSimHDF5Reader(str(tmp_path / "e.h5"),
+                               michel_max_muon_momentum=12.5) as r:
+            assert r._michel_p == 12.5
+
+
 def write_edepsim(path, prim_ids=None, steps=True):
     """
     A one-event EDepSim file: EVENT, one step each for tracks 1 and 3 (none

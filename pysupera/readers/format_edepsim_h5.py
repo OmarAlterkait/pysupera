@@ -205,6 +205,15 @@ _DEFAULT_STEP_KEY     = "pstep/lar_vol"
 _DEFAULT_ASS_KEY      = "ass/particle_pstep_lar_vol"
 _DEFAULT_PRIMARY_KEY  = "primary/geant4"
 _DEFAULT_ELECTRON_ENERGY_THRESHOLD = 0.05   # MeV
+#: A muon's decay electron is a Michel only if the muon ended below this
+#: momentum (MeV/c), i.e. had visibly reached its Bragg peak.  At 77 MeV/c a
+#: muon in argon loses 2x the MIP rate (4.2 MeV/cm), has 25 MeV of kinetic
+#: energy and about 35 mm of range left.  A muon decaying that fast brings
+#: that 25 MeV into the decay, and its electron can have up to about 103 MeV
+#: kinetic energy, about 50 MeV above the 52.8 MeV endpoint of a free muon
+#: at rest.  Faster, the decay is in flight on a track still at MIP rate,
+#: and the electron is an ordinary shower.
+_DEFAULT_MICHEL_MAX_MUON_MOMENTUM = 77.0    # MeV/c
 
 
 # ---------------------------------------------------------------------------
@@ -658,9 +667,24 @@ def primary_check_failed(check) -> bool:
     return check is not None and any(len(v) for v in check.values())
 
 
+def _parent_end_momentum(parts: np.ndarray) -> np.ndarray:
+    """
+    |p| (MeV/c) of each particle's direct parent where the parent ended;
+    0 when the parent is not in *parts* or the records have no end momentum.
+    """
+    names = parts.dtype.names or ()
+    if not {"end_px", "end_py", "end_pz"} <= set(names):
+        return np.zeros(len(parts))
+    loc = _search_parents(parts["track_id"], parts["parent_track_id"])
+    pe = np.sqrt(sum(np.asarray(parts[c], dtype=np.float64) ** 2
+                     for c in ("end_px", "end_py", "end_pz")))
+    return np.where(loc != -1, pe[np.clip(loc, 0, None)], 0.0)
+
+
 def _get_interaction_type(parts: np.ndarray,
                           electron_energy_threshold: float = 0.05,
                           is_primary=None,
+                          michel_max_muon_momentum: float = _DEFAULT_MICHEL_MAX_MUON_MOMENTUM,
                           ) -> np.ndarray:
     """
     Derive the pysupera :class:`~pysupera.utils.InteractionType` integer
@@ -674,6 +698,11 @@ def _get_interaction_type(parts: np.ndarray,
     where the muon *ended* -- so every mu- Michel came out ``kOtherShower``.
     It also split them at *electron_energy_threshold*, because ``kDecay``
     had no size check; it has one now (:func:`~pysupera.utils.SetSemanticType`).
+    A muon's decay electron is ``kDecay`` (so ``kMichel``) only if the muon
+    ended below *michel_max_muon_momentum*: what decides is whether its
+    Bragg peak is visible, not whether Geant4 decayed it at rest.  A muon
+    that decays in flight at a higher momentum is still a MIP track where
+    it ends, and its electron -- up to hundreds of MeV -- is ``kOtherShower``.
     ``np.select`` is used instead of a Python loop for performance.
 
     Parameters
@@ -693,6 +722,12 @@ def _get_interaction_type(parts: np.ndarray,
         ``subproc_start`` are not read: Geant4 records no creator process
         for a primary, and the fields hold whatever the converter wrote.
         None takes the particles with ``parent_track_id == -1``.
+    michel_max_muon_momentum : float, optional
+        Muon end momentum (MeV/c) below which its decay electron is a
+        Michel.  Default 77 MeV/c, where a muon in argon loses 2x the MIP
+        rate with about 35 mm of range left
+        (:data:`_DEFAULT_MICHEL_MAX_MUON_MOMENTUM`).  Needs ``end_px``,
+        ``end_py``, ``end_pz``; without them every muon counts as stopped.
 
     Returns
     -------
@@ -730,6 +765,12 @@ def _get_interaction_type(parts: np.ndarray,
     _HAD151 = 151
 
     is_electron = abs(pdg) == 11
+    # A muon decay electron whose muon was still fast where it decayed: no
+    # Bragg peak to see, so not a Michel.
+    in_flight = (is_electron & (abs(parent_pdg) == 13)
+                 & ((proc_start == DK)
+                    | ((proc_start == HAD) & (subproc_start == _HAD151)))
+                 & (_parent_end_momentum(parts) >= michel_max_muon_momentum))
 
     conditions = [
         is_primary,
@@ -745,6 +786,7 @@ def _get_interaction_type(parts: np.ndarray,
         is_electron & (proc_start == EM) & (subproc_start == ION) & np.isin(abs(parent_pdg), [211, 13, 2212, 321]),
         is_electron & (proc_start == EM) & (subproc_start == ION),
         is_electron & (proc_start == EM),
+        in_flight,
         is_electron & (proc_start == DK),
         is_electron & (proc_start == HAD) & (subproc_start == _HAD151),
         is_electron & (ke < electron_energy_threshold),
@@ -764,6 +806,7 @@ def _get_interaction_type(parts: np.ndarray,
         InteractionType.kDelta,
         InteractionType.kIonization,
         InteractionType.kInvalidProcess,
+        InteractionType.kOtherShower,
         InteractionType.kDecay,
         InteractionType.kDecay,
         InteractionType.kCompton,
@@ -807,6 +850,9 @@ class EDepSimHDF5Reader(EventReaderBase):
         Kinetic-energy threshold (MeV) used by the interaction-type
         classifier to separate low-energy from high-energy electrons when
         no cleaner process tag is available.  Default: ``0.05``.
+    michel_max_muon_momentum : float, optional
+        Muon end momentum (MeV/c) below which its decay electron is a
+        Michel (:func:`_get_interaction_type`).  Default: ``77``.
     min_pc_size : int or None, optional
         Forwarded to :class:`~pysupera.data.Particle`.  ``None`` (default)
         uses the module-level ``_DEFAULT_MIN_PC_SIZE``.
@@ -832,6 +878,7 @@ class EDepSimHDF5Reader(EventReaderBase):
         step_key: str     = _DEFAULT_STEP_KEY,
         ass_key: str      = _DEFAULT_ASS_KEY,
         electron_energy_threshold: float = _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
+        michel_max_muon_momentum: float = _DEFAULT_MICHEL_MAX_MUON_MOMENTUM,
         min_pc_size: int | None = None,
         voxel_size: float | None = None,
     ) -> None:
@@ -846,6 +893,7 @@ class EDepSimHDF5Reader(EventReaderBase):
         self._step_key    = step_key
         self._ass_key     = ass_key
         self._e_thresh    = electron_energy_threshold
+        self._michel_p    = michel_max_muon_momentum
         self._min_pc_size = min_pc_size
         # Cell size classification measures a cloud's extent in; see
         # pysupera.utils.count_extent for why rows will not do.
@@ -901,7 +949,8 @@ class EDepSimHDF5Reader(EventReaderBase):
         num_parts = len(parts)
         is_primary, self.last_primary_check = primary_mask(
             parts, read_primaries(self._file, self._primary_key, index))
-        itype     = _get_interaction_type(parts, self._e_thresh, is_primary)
+        itype     = _get_interaction_type(parts, self._e_thresh, is_primary,
+                                          self._michel_p)
         int_ids   = _get_interaction_id(parts,verts)
         offsets   = np.column_stack([
             ass["start"][:num_parts],
@@ -995,6 +1044,9 @@ class EDepSimHDF5Reader(EventReaderBase):
             electron_energy_threshold = float(r.get(
                                               "electron_energy_threshold",
                                               _DEFAULT_ELECTRON_ENERGY_THRESHOLD)),
+            michel_max_muon_momentum  = float(r.get(
+                                              "michel_max_muon_momentum",
+                                              _DEFAULT_MICHEL_MAX_MUON_MOMENTUM)),
             min_pc_size               = int(cfg.particle.get("min_pc_size", -1))
                                         if hasattr(cfg, "particle") else None,
         )

@@ -98,6 +98,7 @@ from .format_edepsim_h5 import (
     _DEFAULT_VERTEX_KEY,
     _DEFAULT_PARTICLE_KEY,
     _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
+    _DEFAULT_MICHEL_MAX_MUON_MOMENTUM,
     _get_parent_pdg,
     _get_interaction_id,
     _get_interaction_type,
@@ -484,6 +485,9 @@ class JaxtpcHDF5Reader(EventReaderBase):
         Kinetic-energy threshold (MeV) for the interaction-type classifier
         (forwarded to :func:`~.format_edepsim_h5._get_interaction_type`).
         Default: ``0.05``.
+    michel_max_muon_momentum : float, optional
+        Muon end momentum (MeV/c) below which its decay electron is a
+        Michel (forwarded likewise).  Default: ``77``.
     min_pc_size : int or None, optional
         Forwarded to :meth:`~pysupera.data.Particle.from_flat_arrays`.
         ``None`` (default) uses the module-level default.
@@ -514,6 +518,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         particle_key: str = _DEFAULT_PARTICLE_KEY,
         primary_key: str  = _DEFAULT_PRIMARY_KEY,
         electron_energy_threshold: float = _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
+        michel_max_muon_momentum: float = _DEFAULT_MICHEL_MAX_MUON_MOMENTUM,
         min_pc_size: int | None = None,
         voxel_size: float | None = None,
         point_source: str | None = None,
@@ -622,6 +627,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         #: (:func:`~.format_edepsim_h5.primary_mask`); None without the table.
         self.last_primary_check = None
         self._e_thresh     = electron_energy_threshold
+        self._michel_p     = michel_max_muon_momentum
         self._min_pc_size  = min_pc_size
         # Cell size classification measures a cloud's extent in; see
         # pysupera.utils.count_extent for why rows will not do.
@@ -770,7 +776,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
         # ── Step 5: derive per-particle scalar labels from EDepSim data ───
         is_primary, self.last_primary_check = primary_mask(
             parts, read_primaries(self._edepsim_file, self._primary_key, index))
-        itype   = _get_interaction_type(parts, self._e_thresh, is_primary)
+        itype   = _get_interaction_type(parts, self._e_thresh, is_primary,
+                                        self._michel_p)
         int_ids = _get_interaction_id(parts, verts)
 
 
@@ -1698,6 +1705,9 @@ class JaxtpcHDF5Reader(EventReaderBase):
             electron_energy_threshold = float(r.get(
                                             "electron_energy_threshold",
                                             _DEFAULT_ELECTRON_ENERGY_THRESHOLD)),
+            michel_max_muon_momentum  = float(r.get(
+                                            "michel_max_muon_momentum",
+                                            _DEFAULT_MICHEL_MAX_MUON_MOMENTUM)),
             min_pc_size               = int(cfg.particle.get("min_pc_size", -1))
                                         if hasattr(cfg, "particle") else None,
         )

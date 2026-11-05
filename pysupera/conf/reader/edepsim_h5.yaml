@@ -58,3 +58,15 @@ ass_key: ass/particle_pstep_lar_vol
 # (→ kOtherShower) when no cleaner G4 process tag is available.  Both give
 # the same semantic type, so this only changes the stored interaction_type.
 electron_energy_threshold: 0.05
+
+# A muon's decay electron is kMichel only if the muon ended below this
+# momentum (MeV/c): the muon must have visibly reached its Bragg peak.
+# 77 MeV/c is where a muon in argon loses 2x the MIP rate (4.2 MeV/cm, vs
+# 2.1); it then has 25 MeV of kinetic energy and about 35 mm of track left.
+# Decaying at up to this momentum, the muon brings up to 25 MeV of kinetic
+# energy into the decay, and its Michel can have up to about 103 MeV of
+# kinetic energy, about 50 MeV more than the 52.8 MeV endpoint of a free
+# muon at rest (see the README, "Michels from a decay in flight").  Above
+# it, the decay is in flight on a track still at MIP rate, and the electron
+# is an ordinary electron: kShower, or kLEScatter if small.
+michel_max_muon_momentum: 77.0
