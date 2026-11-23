@@ -36,3 +36,18 @@ def test_label_layout(tmp_path):
         assert e['volume_1/fragment_id'][()].tolist() == [7, -1, 8]
         assert e['volume_1/is_le'][()].tolist() == [False, False, True]
         assert e['interactions/reaction'][0] == b'CC'
+
+
+def test_two_hits_files_open_at_once():
+    # a run over several inputs keeps every reader open
+    import pysupera.readers.format3 as F
+    a, b = (F.HitsFile.__new__(F.HitsFile) for _ in range(2))
+    for h in (a, b):
+        h._now = h._mem = None
+        h._hits = h._pre = {'entry_000000': types.SimpleNamespace(attrs={})}
+        h._hits = dict(h._hits, config=types.SimpleNamespace(attrs={'readout_type': 'wire'}))
+        h.volumes = lambda key: []
+    for h in (a, b, a):
+        assert 'entry_000000' in h._materialise('entry_000000').name
+    a._mem.close()
+    b._mem.close()

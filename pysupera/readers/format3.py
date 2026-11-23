@@ -223,7 +223,7 @@ class HitsFile:
             return self._mem[key]
         if self._mem is not None:
             self._mem.close()
-        self._mem = h5py.File('format3-event', 'w', driver='core', backing_store=False)
+        self._mem = h5py.File(f'format3-event-{id(self)}', 'w', driver='core', backing_store=False)
         src, pre = self._hits[key], self._pre[key]
         for a in ('job_id', 'job_event', 'source_index', 'source_event_idx'):
             if a in src.attrs and src.attrs[a] != pre.attrs.get(a):

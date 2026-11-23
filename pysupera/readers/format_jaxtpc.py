@@ -983,7 +983,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
                 f"{self._inst_path}: its inputs share a file name "
                 f"({', '.join(srcs)}), so its entries cannot be paired with "
                 f"{self._edepsim_path} by name")
-        me = os.path.basename(self._edepsim_path)
+        me = os.path.basename(self._seg_path if getattr(self, '_format3', False)
+                              else self._edepsim_path)
         return [by_src.get((me, i)) for i in range(self._n_events)]
 
     def _entry_key(self, index):
